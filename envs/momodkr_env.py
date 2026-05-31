@@ -83,14 +83,19 @@ class MomoDkrEnv(gym.Env):
 
     def __init__(
         self,
-        episode_parquet: str | Path,
+        episode_parquet: str | Path | list[str | Path],
         config: EnvConfig | None = None,
         seed: int | None = None,
     ) -> None:
         super().__init__()
         self.config = config or EnvConfig()
-        self.parquet_path = Path(episode_parquet)
-        self._load_episode_data(self.parquet_path)
+        if isinstance(episode_parquet, (str, Path)):
+            self.parquet_paths: list[Path] = [Path(episode_parquet)]
+        else:
+            self.parquet_paths = [Path(p) for p in episode_parquet]
+            if not self.parquet_paths:
+                raise ValueError("episode_parquet list is empty")
+        self._load_all_episodes()
 
         self.action_space = gym.spaces.Discrete(len(ACTION_LABELS))
         self.observation_space = gym.spaces.Box(
@@ -98,6 +103,7 @@ class MomoDkrEnv(gym.Env):
         )
 
         self._rng = np.random.default_rng(seed)
+        self._active_idx: int = 0
         self._cursor: int = 0
         self._start_cursor: int = 0
         self.position = Position()
@@ -110,26 +116,49 @@ class MomoDkrEnv(gym.Env):
 
     # ------------------------------------------------------------------ data
 
-    def _load_episode_data(self, path: Path) -> None:
-        if not path.exists():
-            raise FileNotFoundError(f"episode parquet not found: {path}")
-        df = pd.read_parquet(path)
-        missing_feats = [c for c in MARKET_FEATURE_NAMES if c not in df.columns]
-        if missing_feats:
-            raise KeyError(f"episode parquet missing market features: {missing_feats}")
-        missing_sim = [c for c in SIM_STATE_COLS if c not in df.columns]
-        if missing_sim:
-            raise KeyError(f"episode parquet missing simulator state columns: {missing_sim}")
-        self._features: np.ndarray = df[list(MARKET_FEATURE_NAMES)].to_numpy(dtype=np.float32)
-        self._sim_state: dict[str, np.ndarray] = {
-            c: df[c].to_numpy(dtype=np.float64) for c in SIM_STATE_COLS
-        }
-        self._ts_ms: np.ndarray = df["ts_ms"].to_numpy(dtype=np.int64)
-        self._n_rows: int = len(df)
-        if self._n_rows <= self.config.episode_length_ticks + 1:
-            raise ValueError(
-                f"episode parquet has {self._n_rows} rows, need > {self.config.episode_length_ticks + 1}"
-            )
+    def _load_all_episodes(self) -> None:
+        self._features_pool: list[np.ndarray] = []
+        self._sim_state_pool: list[dict[str, np.ndarray]] = []
+        self._ts_ms_pool: list[np.ndarray] = []
+        self._n_rows_pool: list[int] = []
+        for path in self.parquet_paths:
+            if not path.exists():
+                raise FileNotFoundError(f"episode parquet not found: {path}")
+            df = pd.read_parquet(path)
+            missing_feats = [c for c in MARKET_FEATURE_NAMES if c not in df.columns]
+            if missing_feats:
+                raise KeyError(f"episode parquet missing market features ({path}): {missing_feats}")
+            missing_sim = [c for c in SIM_STATE_COLS if c not in df.columns]
+            if missing_sim:
+                raise KeyError(f"episode parquet missing simulator state columns ({path}): {missing_sim}")
+            features = df[list(MARKET_FEATURE_NAMES)].to_numpy(dtype=np.float32)
+            sim_state = {c: df[c].to_numpy(dtype=np.float64) for c in SIM_STATE_COLS}
+            ts_ms = df["ts_ms"].to_numpy(dtype=np.int64)
+            if len(df) <= self.config.episode_length_ticks + 1:
+                raise ValueError(
+                    f"episode parquet has {len(df)} rows, need > {self.config.episode_length_ticks + 1} ({path})"
+                )
+            self._features_pool.append(features)
+            self._sim_state_pool.append(sim_state)
+            self._ts_ms_pool.append(ts_ms)
+            self._n_rows_pool.append(len(df))
+
+    # Convenience properties that always reflect the active episode.
+    @property
+    def _features(self) -> np.ndarray:
+        return self._features_pool[self._active_idx]
+
+    @property
+    def _sim_state(self) -> dict[str, np.ndarray]:
+        return self._sim_state_pool[self._active_idx]
+
+    @property
+    def _ts_ms(self) -> np.ndarray:
+        return self._ts_ms_pool[self._active_idx]
+
+    @property
+    def _n_rows(self) -> int:
+        return self._n_rows_pool[self._active_idx]
 
     # ------------------------------------------------------------------ gym
 
@@ -137,6 +166,7 @@ class MomoDkrEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        self._active_idx = int(self._rng.integers(0, len(self.parquet_paths)))
         max_start = self._n_rows - self.config.episode_length_ticks - 1
         self._start_cursor = int(self._rng.integers(0, max_start))
         self._cursor = self._start_cursor
@@ -380,6 +410,7 @@ class MomoDkrEnv(gym.Env):
         info: dict[str, Any] = {
             "feature_version": FEATURE_VERSION,
             "feature_spec_checksum": FEATURE_SPEC_CHECKSUM,
+            "active_parquet": str(self.parquet_paths[self._active_idx]),
             "cursor": self._cursor,
             "nav_usd": self.account.nav_usd,
             "drawdown_pct": self.account.drawdown_pct,

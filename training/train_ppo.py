@@ -38,7 +38,7 @@ from training.utils import load_yaml, resolve_schedule_or_float
 logger = logging.getLogger(__name__)
 
 
-def make_env_factory(episode_parquet: Path, env_cfg: EnvConfig, seed_offset: int):
+def make_env_factory(episode_parquet: Path | list[Path], env_cfg: EnvConfig, seed_offset: int):
     def _f():
         env = MomoDkrEnv(episode_parquet, env_cfg, seed=seed_offset)
         return Monitor(env)
@@ -47,7 +47,7 @@ def make_env_factory(episode_parquet: Path, env_cfg: EnvConfig, seed_offset: int
 
 
 def build_vec_env(
-    episode_parquet: Path,
+    episode_parquet: Path | list[Path],
     env_cfg: EnvConfig,
     n_envs: int,
     kind: str,
@@ -132,8 +132,8 @@ def model_kwargs_from_config(train_cfg: dict, log_dir: Path) -> dict:
 def train(
     train_config_path: Path,
     env_config_path: Path,
-    train_parquet: Path,
-    eval_parquet: Path | None,
+    train_parquet: Path | list[Path],
+    eval_parquet: Path | list[Path] | None,
     run_dir: Path,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +147,19 @@ def train(
     train_env = build_vec_env(train_parquet, env_cfg, n_envs, kind, base_seed)
     eval_env = build_vec_env(eval_parquet or train_parquet, env_cfg, n_envs=1, kind="dummy", base_seed=base_seed + 9999)
 
-    model = build_ppo(model_kwargs_from_config(train_cfg, run_dir), train_env)
+    warm_start_from = train_cfg.get("warm_start_from")
+    if warm_start_from:
+        warm_path = Path(warm_start_from)
+        if not warm_path.exists():
+            raise FileNotFoundError(f"warm_start_from checkpoint not found: {warm_path}")
+        logger.info("warm-starting from %s", warm_path)
+        custom_objects = {
+            "learning_rate": resolve_schedule_or_float(train_cfg.get("learning_rate", 3e-4)),
+            "ent_coef": resolve_schedule_or_float(train_cfg.get("ent_coef", 0.005)),
+        }
+        model = PPO.load(warm_path, env=train_env, custom_objects=custom_objects)
+    else:
+        model = build_ppo(model_kwargs_from_config(train_cfg, run_dir), train_env)
 
     eval_cfg = train_cfg.get("eval", {})
     best_dir = run_dir / "best_checkpoint"
@@ -193,15 +205,17 @@ def main() -> None:
     p = argparse.ArgumentParser(description="MomoDkr SB3 PPO trainer")
     p.add_argument("--train-config", required=True)
     p.add_argument("--env-config", required=True)
-    p.add_argument("--train-parquet", required=True)
-    p.add_argument("--eval-parquet", default=None)
+    p.add_argument("--train-parquet", required=True, nargs="+", help="one or more episode parquets (multi-symbol pool)")
+    p.add_argument("--eval-parquet", default=None, nargs="+")
     p.add_argument("--run-dir", required=True)
     args = p.parse_args()
+    train_paths = [Path(x) for x in args.train_parquet]
+    eval_paths = [Path(x) for x in args.eval_parquet] if args.eval_parquet else None
     train(
         Path(args.train_config),
         Path(args.env_config),
-        Path(args.train_parquet),
-        Path(args.eval_parquet) if args.eval_parquet else None,
+        train_paths if len(train_paths) > 1 else train_paths[0],
+        eval_paths if eval_paths is not None and len(eval_paths) > 1 else (eval_paths[0] if eval_paths else None),
         Path(args.run_dir),
     )
 

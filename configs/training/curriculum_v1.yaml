@@ -1,0 +1,27 @@
+stages:
+  - name: btc_only
+    symbols: [BTCUSDT]
+    total_timesteps: 5_000_000
+    warm_start: false
+    # cold-start tighter entropy decay since we want to converge before adding ETH
+    train_overrides:
+      ent_coef: {schedule: linear, start: 0.005, end: 0.001}
+
+  - name: btc_eth
+    symbols: [BTCUSDT, ETHUSDT]
+    total_timesteps: 7_500_000
+    warm_start: true
+    # moleapp lesson 2.2: warm-start needs lower LR to avoid degrading source policy
+    train_overrides:
+      learning_rate: {schedule: linear, start: 0.00005, end: 0.00001}
+      ent_coef: {schedule: linear, start: 0.001, end: 0.0005}
+      clip_range: 0.1
+
+  - name: btc_eth_sol
+    symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+    total_timesteps: 7_500_000
+    warm_start: true
+    train_overrides:
+      learning_rate: {schedule: linear, start: 0.00005, end: 0.000005}
+      ent_coef: {schedule: linear, start: 0.001, end: 0.0005}
+      clip_range: 0.1
