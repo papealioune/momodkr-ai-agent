@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class BreadcrumbConfig:
     unrealized_breadcrumb_coeff: float = 0.3
 

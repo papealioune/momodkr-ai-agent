@@ -29,7 +29,7 @@ import numpy as np
 FUNDING_INTERVAL_TICKS_DEFAULT = 288_000  # 8h at 100ms grid
 
 
-@dataclass(frozen=True)
+@dataclass
 class SimulatorConfig:
     fee_taker_bps: float = 3.5
     fee_maker_bps: float = 1.0

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class PnLRewardConfig:
     win_multiplier: float = 4.0
     loss_multiplier: float = 1.8

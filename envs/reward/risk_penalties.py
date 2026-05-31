@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class RiskPenaltyConfig:
     dd_quadratic_coeff: float = 50.0
     dd_threshold: float = 0.03
