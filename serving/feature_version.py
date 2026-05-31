@@ -74,6 +74,19 @@ assert POSITION_FEATURE_DIM == 4, f"expected 4 position features, got {POSITION_
 assert OBS_DIM == 30, f"expected 30-dim observation, got {OBS_DIM}"
 
 
+# Simulator state columns preserved alongside features but NOT exposed as
+# observations to the policy. The env reads them to simulate fills, fees,
+# slippage, and funding accruals. Keeping them in the episode parquet
+# avoids a separate snapshot join at training time.
+SIM_STATE_COLS: tuple[str, ...] = (
+    "mid",
+    "bid_px",
+    "ask_px",
+    "abs_volume_100ms",
+    "funding_rate",
+)
+
+
 def feature_spec_checksum() -> str:
     """Stable hash of (version, ordered feature names) for skew detection.
 

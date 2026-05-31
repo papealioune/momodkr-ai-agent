@@ -23,7 +23,7 @@ import pandas as pd
 
 from data.preprocessors.microstructure_features import add_ofi_features, add_trade_flow_features
 from data.preprocessors.momentum_features import TICKS_PER_SECOND, add_momentum_features
-from serving.feature_version import FEATURE_VERSION, MARKET_FEATURE_NAMES
+from serving.feature_version import FEATURE_VERSION, MARKET_FEATURE_NAMES, SIM_STATE_COLS
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,8 @@ def build_market_features(snapshots: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise KeyError(f"feature engineer did not produce: {missing}")
 
-    out = df[["ts_ms", *MARKET_FEATURE_NAMES]].copy()
+    sim_cols_present = [c for c in SIM_STATE_COLS if c in df.columns]
+    out = df[["ts_ms", *MARKET_FEATURE_NAMES, *sim_cols_present]].copy()
     # drop rolling-window warmup rows where any non-funding rolling feature is NaN
     rolling_cols = [
         "ofi_1s", "ofi_5s", "ofi_30s",
@@ -86,6 +87,8 @@ def build_market_features(snapshots: pd.DataFrame) -> pd.DataFrame:
     ]
     out = out.dropna(subset=rolling_cols).reset_index(drop=True)
     for c in MARKET_FEATURE_NAMES:
+        out[c] = out[c].astype("float32")
+    for c in sim_cols_present:
         out[c] = out[c].astype("float32")
     return out
 

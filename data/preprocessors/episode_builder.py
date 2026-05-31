@@ -25,7 +25,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from serving.feature_version import FEATURE_SPEC_CHECKSUM, FEATURE_VERSION, MARKET_FEATURE_NAMES
+from serving.feature_version import (
+    FEATURE_SPEC_CHECKSUM,
+    FEATURE_VERSION,
+    MARKET_FEATURE_NAMES,
+    SIM_STATE_COLS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +93,8 @@ def build_episodes(
     if full.empty:
         raise ValueError("no rows after concat")
 
-    keep_cols = ["ts_ms", *MARKET_FEATURE_NAMES]
+    sim_cols_present = [c for c in SIM_STATE_COLS if c in full.columns]
+    keep_cols = ["ts_ms", *MARKET_FEATURE_NAMES, *sim_cols_present]
     full = full[keep_cols]
 
     n = len(full)

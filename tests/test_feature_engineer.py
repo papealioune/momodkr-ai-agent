@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from data.preprocessors.feature_engineer import build_market_features
-from serving.feature_version import MARKET_FEATURE_NAMES
+from serving.feature_version import MARKET_FEATURE_NAMES, SIM_STATE_COLS
 
 
 def _synthetic_snapshot_day(n_ticks: int = 4500, start_ms: int = 1_700_000_000_000) -> pd.DataFrame:
@@ -47,7 +47,10 @@ def _synthetic_snapshot_day(n_ticks: int = 4500, start_ms: int = 1_700_000_000_0
 def test_build_market_features_returns_canonical_columns() -> None:
     snaps = _synthetic_snapshot_day()
     feats = build_market_features(snaps)
-    assert list(feats.columns) == ["ts_ms", *MARKET_FEATURE_NAMES]
+    # feature_engineer keeps sim-state columns (mid, bid_px, ask_px, abs_volume_100ms, funding_rate)
+    # alongside the 26 obs features so the env can simulate fills without re-loading snapshots.
+    expected = ["ts_ms", *MARKET_FEATURE_NAMES, *SIM_STATE_COLS]
+    assert list(feats.columns) == expected
 
 
 def test_build_market_features_drops_warmup_rows() -> None:
