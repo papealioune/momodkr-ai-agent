@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,9 +46,10 @@ from data.collectors.binance_vision_l2_collector import (
     fetch_all,
     parse_and_persist,
 )
-from data.collectors.r2_funding_fetcher import fetch_asset_funding, rclone_available
+from data.collectors.r2_funding_fetcher import fetch_asset_funding
 from data.reconstructors.order_book_reconstructor import reconstruct_day
 from data.validators.validate_l2_data import validate_snapshots
+from scripts.r2_sync import upload_tree
 
 logger = logging.getLogger(__name__)
 
@@ -82,35 +82,31 @@ def _kline_local_path(dataset_root: Path, symbol: str) -> Path | None:
     return files[-1] if files else None
 
 
-def _rclone_upload(local_dir: Path, remote: str, remote_prefix: str, dry_run: bool = False) -> None:
-    """Sync local_dir up to remote:remote_prefix/<local_dir.name>/ via rclone."""
-    src = str(local_dir)
-    dst = f"{remote}:{remote_prefix.rstrip('/')}"
-    cmd = ["rclone", "copy", src, dst, "--include", "*.parquet", "--transfers", "8"]
-    if dry_run:
-        cmd.append("--dry-run")
-    logger.info("rclone upload: %s -> %s", src, dst)
-    subprocess.run(cmd, check=True)
-
-
-def _ensure_funding(
-    symbols: list[str],
+def _upload_symbol_streams(
+    symbol: str,
     dataset_root: Path,
-    r2_remote: str,
-    r2_funding_prefix: str,
-    skip: bool,
-) -> None:
+    streams: tuple[str, ...],
+    overwrite: bool = False,
+) -> int:
+    """Upload all per-day parquets for a symbol's streams to R2 under momodkr/<SYMBOL>/<stream>/."""
+    total = 0
+    for stream in streams:
+        d = dataset_root / symbol / stream
+        if not d.exists():
+            continue
+        total += upload_tree(dataset_root, filter_substr=f"{symbol}/{stream}/", overwrite=overwrite)
+    return total
+
+
+def _ensure_funding(symbols: list[str], dataset_root: Path, skip: bool) -> None:
     if skip:
         logger.info("--skip-funding set; not pulling funding from R2")
-        return
-    if not rclone_available():
-        logger.warning("rclone not available; skipping funding pull")
         return
     for sym in symbols:
         asset = REVERSE_BINANCE_MAP.get(sym, sym)
         try:
-            fetch_asset_funding(r2_remote, r2_funding_prefix, asset, dataset_root)
-        except subprocess.CalledProcessError as e:
+            fetch_asset_funding(asset, dataset_root)
+        except Exception as e:
             logger.warning("funding pull failed for %s: %s", asset, e)
 
 
@@ -119,8 +115,7 @@ def _process_day(
     day: date,
     dataset_root: Path,
     grid_ms: int,
-    r2_remote: str | None,
-    r2_prefix: str | None,
+    upload: bool,
     overwrite_snapshot: bool,
 ) -> DayResult:
     day_iso = day.isoformat()
@@ -151,11 +146,8 @@ def _process_day(
         return DayResult(symbol, day, snapshot_path, False, summary, False, error="validation failed")
 
     uploaded = False
-    if r2_remote and r2_prefix:
-        for stream in (*STREAMS, "snapshots"):
-            stream_dir = dataset_root / symbol / stream
-            if stream_dir.exists():
-                _rclone_upload(stream_dir, r2_remote, f"{r2_prefix.rstrip('/')}/{symbol}/{stream}")
+    if upload:
+        _upload_symbol_streams(symbol, dataset_root, (*STREAMS, "snapshots"))
         uploaded = True
 
     return DayResult(symbol, day, snapshot_path, True, summary, uploaded)
@@ -175,9 +167,7 @@ def main() -> None:
     p.add_argument("--overwrite-downloads", action="store_true")
     p.add_argument("--overwrite-snapshots", action="store_true")
     p.add_argument("--streams", nargs="+", default=list(STREAMS))
-    p.add_argument("--r2-remote", default="moleapp-r2", help="rclone remote name; '' to disable upload")
-    p.add_argument("--r2-prefix", default="momodkr/datasets", help="remote prefix for uploaded parquets")
-    p.add_argument("--r2-funding-prefix", default="datasets", help="prefix where moleapp funding parquets live")
+    p.add_argument("--no-upload", action="store_true", help="run download/parse/reconstruct only; skip R2 sync")
     p.add_argument("--skip-funding", action="store_true")
     p.add_argument("--upload-only", action="store_true", help="skip download/parse/reconstruct; only sync local to R2")
     args = p.parse_args()
@@ -186,23 +176,17 @@ def main() -> None:
     end = datetime.strptime(args.end, "%Y-%m-%d").date()
     raw_root = Path(args.raw_root)
     ds_root = Path(args.dataset_root)
-    r2_remote = args.r2_remote or None
-    r2_prefix = args.r2_prefix or None
+    upload = not args.no_upload
 
     t0 = time.time()
 
     if args.upload_only:
-        if not (r2_remote and r2_prefix and rclone_available()):
-            sys.exit("upload-only requires r2-remote, r2-prefix, and rclone on PATH")
         for sym in args.symbols:
-            for stream in (*STREAMS, "snapshots", "fundingRate"):
-                d = ds_root / sym / stream
-                if d.exists():
-                    _rclone_upload(d, r2_remote, f"{r2_prefix.rstrip('/')}/{sym}/{stream}")
+            _upload_symbol_streams(sym, ds_root, (*STREAMS, "snapshots", "fundingRate"))
         logger.info("upload-only complete in %.1fs", time.time() - t0)
         return
 
-    _ensure_funding(args.symbols, ds_root, r2_remote or "moleapp-r2", args.r2_funding_prefix, args.skip_funding)
+    _ensure_funding(args.symbols, ds_root, args.skip_funding)
 
     tasks = build_tasks(args.symbols, start, end, streams=args.streams)
     logger.info("planned %d download tasks", len(tasks))
@@ -224,8 +208,7 @@ def main() -> None:
                 day,
                 ds_root,
                 args.grid_ms,
-                r2_remote,
-                r2_prefix,
+                upload,
                 args.overwrite_snapshots,
             ): (sym, day)
             for sym, day in day_args

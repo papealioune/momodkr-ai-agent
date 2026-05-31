@@ -16,9 +16,30 @@ Phase 0 — repo bootstrap.
 - **Secrets**: Akeyless (vaultless DFC)
 - **Storage**: Cloudflare R2
 
-## Quickstart
+## Quickstart (local dev)
 ```bash
 pip install -e ".[dev]"
 pytest -q
 ruff check .
 ```
+
+## Data ingest on RunPod
+The 2-year L2 dataset (~600 GB raw + parsed + snapshots) is built on a CPU pod, not locally.
+
+1. Launch a RunPod CPU pod (8-16 vCPU, ~1 TB persistent volume mounted at `/workspace`).
+2. Clone the repo and `cd` into it.
+3. Set the R2 credentials in the pod's env vars (see [`.env.example`](.env.example)):
+   - `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+4. Bootstrap:
+   ```bash
+   bash runpod/setup.sh
+   ```
+5. Run the 7-day test (validates the Phase 1 gate: mid-vs-kline drift ≤ 1bp):
+   ```bash
+   bash runpod/run_ingest.sh test
+   ```
+6. If green, run the full 2-year pull:
+   ```bash
+   nohup bash runpod/run_ingest.sh full > /workspace/momodkr-ingest.log 2>&1 &
+   ```
+Data uploads incrementally to `s3://moleapp-rl-data/momodkr/{SYMBOL}/{stream}/<YYYY-MM-DD>.parquet`.

@@ -33,6 +33,10 @@ dependencies = [
     "akeyless>=4.0.0",
     "akeyless-cloud-id>=0.2.0",
 
+    # S3-compatible client for Cloudflare R2 (shared bucket with moleapp under 'momodkr/' prefix)
+    "boto3>=1.34.0",
+    "python-dotenv>=1.0.0",
+
     # Observability
     "wandb>=0.17.0",
     "matplotlib>=3.9.0",
