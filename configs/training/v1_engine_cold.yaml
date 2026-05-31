@@ -1,0 +1,58 @@
+run_name: v1-engine-cold
+seed: [42, 43, 44]
+
+algo: ppo
+policy: MultiInputLstmPolicy
+total_timesteps: 20_000_000
+n_steps: 2048
+batch_size: 512
+n_epochs: 4
+gamma: 0.995
+gae_lambda: 0.95
+clip_range: 0.2
+clip_range_vf: null
+learning_rate:
+  schedule: linear
+  start: 0.0003
+  end: 0.00005
+ent_coef:
+  schedule: linear
+  start: 0.005
+  end: 0.0005
+vf_coef: 0.5
+max_grad_norm: 0.5
+
+policy_kwargs:
+  cnn_arch: [32, 64, 64]
+  lstm_hidden_size: 128
+  lstm_num_layers: 1
+  mlp_extractor_arch: [128, 64]
+  ortho_init: true
+
+env_id: MomoDkrEnv-v1
+env_config: configs/env/momodkr_v1.yaml
+data_config: configs/data/binance_vision_v1.yaml
+
+vec_env:
+  type: subproc
+  n_envs: 12
+
+eval:
+  n_eval_episodes: 8
+  eval_freq: 50_000
+  best_model_save_path: runs/${run_name}/best_checkpoint
+  log_path: runs/${run_name}/eval_logs
+
+callbacks:
+  sigma_divergence_killswitch:
+    threshold_action_entropy_pct: 0.85
+    consecutive_evals: 2
+  trade_log:
+    record_obs: true
+    record_mp4: false
+  best_checkpoint_tracker:
+    metric: eval/mean_reward
+
+checkpoint_freq: 250_000
+log_dir: runs/${run_name}
+wandb_project: momodkr

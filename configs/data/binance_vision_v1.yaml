@@ -1,0 +1,15 @@
+source: binance_vision
+url_base: https://data.binance.vision/data/futures/um/daily
+symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+data_types:
+  - aggTrades
+  - bookDepth
+depth_levels: 10
+snapshot_grid_ms: 100
+date_range:
+  start: 2024-01-01
+  end: 2025-12-31
+output:
+  path: data/datasets
+  format: parquet
+  compression: zstd

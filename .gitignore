@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+/venv/
+/.venv/
+/env/
+
+# Data — never commit raw or processed datasets
+data/raw/
+data/datasets/
+data/episodes/
+*.parquet
+*.npy
+*.pkl
+*.csv
+
+# Model artifacts
+*.onnx
+*.pth
+*.pt
+checkpoints/
+best_checkpoint/
+runs/
+wandb/
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+secrets/
+
+# Rust
+execution/rust_engine/target/
+execution/rust_engine/**/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Eval recordings
+*.mp4
+trade_logs/

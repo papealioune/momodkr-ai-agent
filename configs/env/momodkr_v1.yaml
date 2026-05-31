@@ -1,0 +1,44 @@
+env:
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  book_depth: 10
+  obs:
+    cnn_shape: [4, 10, 50]      # channels=[bid_size, ask_size, bid_dprice, ask_dprice], depth=10, lookback=50 ticks (5s @ 100ms)
+    lstm_seq_len: 50
+    lstm_scalar_dim: 12         # OFI, micro-price, momentum_100ms/500ms/1s, funding_cum, pos_size, pos_pnl_pct, hold_ticks, ...
+    feature_version: "0.1.0"
+
+action:
+  type: discrete
+  n: 5
+  labels: [hold, mkt_buy, mkt_sell, post_bid, post_ask]
+
+leverage: 6
+max_position_notional_pct: 0.17   # 6× × 17% ≈ 100% notional (moleapp V9 safe zone)
+liquidation_maintenance_margin: 0.03
+
+simulator:
+  fee_taker_bps: 3.5
+  fee_maker_bps: 1.0
+  slippage_model: sqrt_kyle
+  slippage_c: 0.001
+  latency_bps_uniform: [5, 20]
+  fee_noise_pct: 0.05
+  slippage_noise_pct: 0.20
+  funding_interval_ticks: 288000   # 8h @ 100ms ticks
+
+episode:
+  length_ticks: 9000               # 15 minutes @ 100ms
+  reset_on_dd: 0.05
+  reset_on_liquidation: true
+
+reward:
+  win_multiplier: 4.0
+  loss_multiplier: 1.8
+  per_entry_cost: 0.02
+  dd_quadratic_coeff: 50.0
+  dd_threshold: 0.03
+  funding_coeff: 0.01
+  losing_streak_coeff: 0.05
+  losing_streak_offset: 2
+  unrealized_breadcrumb_coeff: 0.3
+  reward_floor: -5.0

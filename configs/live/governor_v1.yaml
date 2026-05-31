@@ -1,0 +1,29 @@
+leverage_clamp: 6
+position_notional_pct_cap: 0.30
+pre_submit_circuit_breaker:
+  trigger_pct_1s: 0.01
+funding_regime_gate:
+  threshold_8h: 0.0005
+consecutive_loss_kill:
+  losses: 5
+  cooldown_minutes: 30
+macro_crash_blocker:
+  btc_drop_pct: 0.03
+  window_seconds: 60
+  cooldown_minutes: 60
+trailing_dd_circuit_breaker:
+  threshold_pct: 0.08
+  action: pause_manual_restart
+redemption_pause:
+  outflow_pct_24h: 0.20
+
+api_agent:
+  allowed_actions: [trade, cancel]
+  disallowed_actions: [withdraw, transfer]
+  audit_interval_hours: 24
+
+secrets_provider: akeyless
+akeyless_paths:
+  api_agent_key: /momodkr/prod/hl_api_agent_pk
+  r2_credentials: /momodkr/prod/r2
+  wandb_api_key: /momodkr/prod/wandb
