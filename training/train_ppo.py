@@ -30,6 +30,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
 from envs.momodkr_env import EnvConfig, MomoDkrEnv
+from envs.reward.wrappers import apply_full_reward_shaping
 from training.callbacks.best_checkpoint_tracker import BestCheckpointTracker
 from training.callbacks.sigma_divergence_killswitch import SigmaDivergenceKillswitch
 from training.callbacks.trade_log_callback import TradeLogCallback
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 def make_env_factory(episode_parquet: Path | list[Path], env_cfg: EnvConfig, seed_offset: int):
     def _f():
         env = MomoDkrEnv(episode_parquet, env_cfg, seed=seed_offset)
+        env = apply_full_reward_shaping(env, env_cfg.risk)
         return Monitor(env)
 
     return _f
@@ -93,6 +95,9 @@ def env_cfg_from_yaml(env_yaml_path: Path) -> EnvConfig:
     cfg.risk.funding_coeff = float(reward.get("funding_coeff", cfg.risk.funding_coeff))
     cfg.risk.losing_streak_coeff = float(reward.get("losing_streak_coeff", cfg.risk.losing_streak_coeff))
     cfg.risk.losing_streak_offset = int(reward.get("losing_streak_offset", cfg.risk.losing_streak_offset))
+    cfg.risk.churn_penalty = float(reward.get("churn_penalty", cfg.risk.churn_penalty))
+    cfg.risk.peak_dd_coeff = float(reward.get("peak_dd_coeff", cfg.risk.peak_dd_coeff))
+    cfg.risk.peak_dd_threshold = float(reward.get("peak_dd_threshold", cfg.risk.peak_dd_threshold))
     cfg.risk.reward_floor = float(reward.get("reward_floor", cfg.risk.reward_floor))
     cfg.breadcrumb.unrealized_breadcrumb_coeff = float(reward.get("unrealized_breadcrumb_coeff", cfg.breadcrumb.unrealized_breadcrumb_coeff))
     return cfg

@@ -5,8 +5,23 @@ import pandas as pd
 import pytest
 
 from envs.base_hft_env import Action, PositionSide
+from envs.market_simulator import SimulatorConfig
 from envs.momodkr_env import EnvConfig, MomoDkrEnv
 from serving.feature_version import MARKET_FEATURE_NAMES, OBS_DIM, SIM_STATE_COLS
+
+
+def _instant_sim_cfg() -> SimulatorConfig:
+    """Test-mode simulator: zero latency, no walk-the-book, no tick rounding."""
+    return SimulatorConfig(
+        latency_ticks_min=0,
+        latency_ticks_max=0,
+        walk_book=False,
+        trade_through_limit_fills=False,
+        fee_noise_pct=0.0,
+        slippage_noise_pct=0.0,
+        tick_size_by_symbol={},
+        default_tick_size=0.0,
+    )
 
 
 def _synthetic_episode(n_rows: int = 12_000, drift_bps_per_tick: float = 0.0, seed: int = 0) -> pd.DataFrame:
@@ -37,7 +52,7 @@ def episode_parquet(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def cfg_short_episodes() -> EnvConfig:
-    return EnvConfig(episode_length_ticks=500)
+    return EnvConfig(episode_length_ticks=500, sim=_instant_sim_cfg())
 
 
 def test_env_obs_and_action_space(episode_parquet: Path, cfg_short_episodes: EnvConfig) -> None:

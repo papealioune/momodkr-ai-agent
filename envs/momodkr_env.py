@@ -33,12 +33,14 @@ from envs.base_hft_env import (
     ACTION_LABELS,
     AccountState,
     Action,
+    ActionQueue,
     PendingLimit,
     Position,
     PositionSide,
 )
 from envs.market_simulator import (
     SimulatorConfig,
+    draw_latency_ticks,
     is_liquidated,
     limit_buy_fill,
     limit_sell_fill,
@@ -48,14 +50,7 @@ from envs.market_simulator import (
 )
 from envs.reward.breadcrumb import BreadcrumbConfig, unrealized_breadcrumb
 from envs.reward.pnl_reward import PnLRewardConfig, realized_pnl_reward
-from envs.reward.risk_penalties import (
-    RiskPenaltyConfig,
-    apply_floor,
-    funding_cumulative_penalty,
-    losing_streak_entry_penalty,
-    per_entry_cost,
-    quadratic_drawdown_penalty,
-)
+from envs.reward.risk_penalties import RiskPenaltyConfig
 from serving.feature_version import (
     FEATURE_SPEC_CHECKSUM,
     FEATURE_VERSION,
@@ -76,6 +71,10 @@ class EnvConfig:
     risk: RiskPenaltyConfig = field(default_factory=RiskPenaltyConfig)
     breadcrumb: BreadcrumbConfig = field(default_factory=BreadcrumbConfig)
     liquidation_penalty: float = -5.0
+    # Symbol resolved per active episode for tick-size lookup. The env tries to
+    # infer it from the parquet filename (.../<SYMBOL>/...); override here for
+    # synthetic test data.
+    override_symbol: str | None = None
 
 
 class MomoDkrEnv(gym.Env):
@@ -108,6 +107,7 @@ class MomoDkrEnv(gym.Env):
         self._start_cursor: int = 0
         self.position = Position()
         self.pending = PendingLimit()
+        self.action_queue = ActionQueue()
         self.account = AccountState(
             initial_nav_usd=self.config.initial_nav_usd,
             nav_usd=self.config.initial_nav_usd,
@@ -172,6 +172,7 @@ class MomoDkrEnv(gym.Env):
         self._cursor = self._start_cursor
         self.position.reset()
         self.pending.cancel()
+        self.action_queue.reset()
         self.account = AccountState(
             initial_nav_usd=self.config.initial_nav_usd,
             nav_usd=self.config.initial_nav_usd,
@@ -188,6 +189,9 @@ class MomoDkrEnv(gym.Env):
         opened_this_step = False
         realized_net_pnl_pct = 0.0
         position_closed = False
+        liquidated = False
+        n_cancellations_this_step = 0
+        churned_limit = False
 
         # advance the cursor: the simulator looks at next-tick prices to resolve fills
         if self._cursor + 1 >= self._n_rows:
@@ -202,54 +206,76 @@ class MomoDkrEnv(gym.Env):
         recent_volume_usd = float(self._sim_state["abs_volume_100ms"][prev_idx]) * prev_mid
         funding_rate = float(self._sim_state["funding_rate"][next_idx])
 
-        # 1. resolve any resting limit
+        # 1. enqueue the agent's action (HOLD doesn't enqueue)
+        if act != Action.HOLD:
+            # Cancel any in-flight prior orders that the agent is implicitly superseding
+            # (only when this action is a market order; queued limits are typically left
+            # alone unless the agent explicitly cancels with POST_BID/POST_ASK while flat).
+            if act in (Action.MKT_BUY, Action.MKT_SELL) and self.action_queue.n_in_flight > 0:
+                n_cancellations_this_step += self.action_queue.cancel_all()
+            latency = draw_latency_ticks(self._rng, self.config.sim)
+            self.action_queue.push(int(act), execute_at_tick=self._cursor + latency, issued_at_tick=self._cursor)
+
+        # 2. resolve any resting limit against next tick's book (trade-through aware)
         if self.pending.is_open:
-            filled, opened_this_step, realized_net_pnl_pct, position_closed = self._resolve_pending_limit(
-                prev_mid=self.pending.prev_mid,
-                next_mid=next_mid,
+            filled, opened_via_limit, realized_via_limit, closed_via_limit = self._resolve_pending_limit(
+                prev_mid=self.pending.prev_mid, next_mid=next_mid, next_bid=next_bid, next_ask=next_ask,
+                abs_volume=float(self._sim_state["abs_volume_100ms"][next_idx]),
             )
             if filled:
                 self.pending.cancel()
+                opened_this_step = opened_this_step or opened_via_limit
+                realized_net_pnl_pct += realized_via_limit
+                position_closed = position_closed or closed_via_limit
             else:
                 self.pending.age_ticks += 1
                 if self.pending.age_ticks >= self.config.sim.limit_max_age_ticks:
                     self.pending.cancel()
+                    churned_limit = True
 
-        # 2. apply the new action
-        if act in (Action.MKT_BUY, Action.MKT_SELL):
-            opened_via_market, realized_via_market, closed_via_market = self._apply_market_action(
-                act, next_bid=next_bid, next_ask=next_ask, next_mid=next_mid, recent_volume_usd=recent_volume_usd
-            )
-            opened_this_step = opened_this_step or opened_via_market
-            realized_net_pnl_pct += realized_via_market
-            position_closed = position_closed or closed_via_market
-        elif act in (Action.POST_BID, Action.POST_ASK) and not self.pending.is_open:
-            self._post_limit(act, bid_px=float(self._sim_state["bid_px"][prev_idx]), ask_px=float(self._sim_state["ask_px"][prev_idx]), mid=prev_mid)
-        # Action.HOLD: no-op
+        # 3. drain any actions whose latency has elapsed
+        ready = self.action_queue.pop_ready(self._cursor)
+        for delayed in ready:
+            ready_act = Action(delayed.action)
+            if ready_act in (Action.MKT_BUY, Action.MKT_SELL):
+                opened_via_mkt, realized_via_mkt, closed_via_mkt = self._apply_market_action(
+                    ready_act,
+                    next_bid=next_bid,
+                    next_ask=next_ask,
+                    next_mid=next_mid,
+                    recent_volume_usd=recent_volume_usd,
+                    next_idx=next_idx,
+                )
+                opened_this_step = opened_this_step or opened_via_mkt
+                realized_net_pnl_pct += realized_via_mkt
+                position_closed = position_closed or closed_via_mkt
+            elif ready_act in (Action.POST_BID, Action.POST_ASK) and not self.pending.is_open:
+                self._post_limit(
+                    ready_act,
+                    bid_px=float(self._sim_state["bid_px"][next_idx]),
+                    ask_px=float(self._sim_state["ask_px"][next_idx]),
+                    mid=next_mid,
+                )
 
-        # 3. accrue funding for an open position
+        # 4. accrue funding for an open position
         if self.position.is_open:
             funding_per_tick = per_tick_funding_pct(funding_rate, self.config.sim)
             self.position.cumulative_funding_pct += funding_per_tick * float(self.position.side)
             self.position.hold_ticks += 1
 
-        # 4. mark-to-market for unrealized PnL and liquidation
+        # 5. mark-to-market for unrealized PnL and liquidation
         unreal_pct = self._unrealized_pnl_pct(next_mid)
         if self.position.is_open:
             self.position.peak_unrealized_pct = max(self.position.peak_unrealized_pct, unreal_pct)
-            # leverage-amplified PnL on notional collapses the position when it crosses -1/L + mm
             unreal_on_notional = unreal_pct / max(self.config.sim.leverage, 1)
             if is_liquidated(unreal_on_notional, self.config.sim):
-                realized_net_pnl_pct += -1.0  # lose the full margin
+                realized_net_pnl_pct += -1.0
                 position_closed = True
+                liquidated = True
                 self.position.reset()
 
-        # 5. reward composition
-        reward = 0.0
+        # 6. NAV accounting + bookkeeping
         if position_closed and realized_net_pnl_pct != 0.0:
-            reward += realized_pnl_reward(realized_net_pnl_pct, self.config.pnl)
-            # realized_net_pnl_pct is already leveraged (return on margin posted), so the
-            # NAV update only scales by the fraction of NAV that was posted as margin.
             self.account.nav_usd *= (1.0 + realized_net_pnl_pct * self.config.max_position_notional_pct)
             self.account.peak_nav_usd = max(self.account.peak_nav_usd, self.account.nav_usd)
             self.account.realized_pnl_pct_cumulative += realized_net_pnl_pct
@@ -257,28 +283,44 @@ class MomoDkrEnv(gym.Env):
                 self.account.consecutive_losses += 1
             else:
                 self.account.consecutive_losses = 0
-        reward += unrealized_breadcrumb(unreal_pct, self.position.is_open, self.config.breadcrumb)
-        reward += per_entry_cost(opened_this_step, self.config.risk)
-        reward += losing_streak_entry_penalty(self.account.consecutive_losses, opened_this_step, self.config.risk)
-        reward += quadratic_drawdown_penalty(self.account.drawdown_pct, self.config.risk)
-        if self.position.is_open:
-            reward += funding_cumulative_penalty(self.position.cumulative_funding_pct, self.config.risk)
-        reward = apply_floor(reward, self.config.risk)
 
-        # 6. termination logic
+        # 7. base reward = realized carrot + breadcrumb. The risk-shaping wrappers
+        # (envs.reward.wrappers.RewardShapingWrapper) handle DD / churn / peak-DD /
+        # funding / per-entry / losing-streak / floor on top of this. Keeping the
+        # core env focused on state transitions + matching.
+        reward = 0.0
+        if position_closed and realized_net_pnl_pct != 0.0:
+            reward += realized_pnl_reward(realized_net_pnl_pct, self.config.pnl)
+        reward += unrealized_breadcrumb(unreal_pct, self.position.is_open, self.config.breadcrumb)
+
+        churn_cancellations = n_cancellations_this_step + (1 if churned_limit else 0)
+
+        # 8. termination logic
         self._cursor = next_idx
         elapsed = self._cursor - self._start_cursor
-        terminated = False
-        truncated = False
-        info: dict[str, Any] = {}
-        if self.account.drawdown_pct >= self.config.reset_on_dd:
-            terminated = True
-            info["reason"] = "drawdown_kill"
-        elif elapsed >= self.config.episode_length_ticks:
-            truncated = True
-            info["reason"] = "episode_end"
+        terminated = liquidated or self.account.drawdown_pct >= self.config.reset_on_dd
+        truncated = elapsed >= self.config.episode_length_ticks
+        extra: dict[str, Any] = {
+            "opened_this_step": opened_this_step,
+            "position_closed": position_closed,
+            "liquidated": liquidated,
+            "realized_net_pnl_pct": realized_net_pnl_pct,
+            "unrealized_pct": unreal_pct,
+            "peak_unrealized_pct": float(self.position.peak_unrealized_pct) if self.position.is_open else 0.0,
+            "has_position": self.position.is_open,
+            "n_cancellations_this_step": churn_cancellations,
+            "cumulative_funding_pct": float(self.position.cumulative_funding_pct) if self.position.is_open else 0.0,
+            "consecutive_losses": int(self.account.consecutive_losses),
+            "drawdown_pct": self.account.drawdown_pct,
+        }
+        if terminated and liquidated:
+            extra["reason"] = "liquidation"
+        elif terminated:
+            extra["reason"] = "drawdown_kill"
+        elif truncated:
+            extra["reason"] = "episode_end"
 
-        return self._build_obs(), float(reward), terminated, truncated, self._info(extra=info)
+        return self._build_obs(), float(reward), terminated, truncated, self._info(extra=extra)
 
     # ------------------------------------------------------------------ helpers
 
@@ -301,12 +343,47 @@ class MomoDkrEnv(gym.Env):
                 self.pending.age_ticks = 0
                 self.pending.intended_notional_usd = self.account.nav_usd * self.config.max_position_notional_pct * self.config.sim.leverage
 
-    def _resolve_pending_limit(self, prev_mid: float, next_mid: float) -> tuple[bool, bool, float, bool]:
+    def _ask_depth_tuple(self, idx: int) -> tuple[float, float, float, float]:
+        return (
+            float(self._sim_state.get("ask_depth_pct_pos_0_1", np.zeros(1))[idx] if "ask_depth_pct_pos_0_1" in self._sim_state else 0.0),
+            float(self._sim_state.get("ask_depth_pct_pos_0_2", np.zeros(1))[idx] if "ask_depth_pct_pos_0_2" in self._sim_state else 0.0),
+            float(self._sim_state.get("ask_depth_pct_pos_0_5", np.zeros(1))[idx] if "ask_depth_pct_pos_0_5" in self._sim_state else 0.0),
+            float(self._sim_state.get("ask_depth_pct_pos_1_0", np.zeros(1))[idx] if "ask_depth_pct_pos_1_0" in self._sim_state else 0.0),
+        )
+
+    def _bid_depth_tuple(self, idx: int) -> tuple[float, float, float, float]:
+        return (
+            float(self._sim_state.get("bid_depth_pct_neg_0_1", np.zeros(1))[idx] if "bid_depth_pct_neg_0_1" in self._sim_state else 0.0),
+            float(self._sim_state.get("bid_depth_pct_neg_0_2", np.zeros(1))[idx] if "bid_depth_pct_neg_0_2" in self._sim_state else 0.0),
+            float(self._sim_state.get("bid_depth_pct_neg_0_5", np.zeros(1))[idx] if "bid_depth_pct_neg_0_5" in self._sim_state else 0.0),
+            float(self._sim_state.get("bid_depth_pct_neg_1_0", np.zeros(1))[idx] if "bid_depth_pct_neg_1_0" in self._sim_state else 0.0),
+        )
+
+    def _resolve_symbol(self) -> str | None:
+        if self.config.override_symbol:
+            return self.config.override_symbol
+        parts = self.parquet_paths[self._active_idx].parts
+        for p in reversed(parts):
+            if p in self.config.sim.tick_size_by_symbol:
+                return p
+        return None
+
+    def _resolve_pending_limit(
+        self,
+        prev_mid: float,
+        next_mid: float,
+        next_bid: float,
+        next_ask: float,
+        abs_volume: float,
+    ) -> tuple[bool, bool, float, bool]:
         opened = False
         realized = 0.0
         closed = False
         if self.pending.side == PositionSide.LONG:
-            filled, fill_px, fee_pct = limit_buy_fill(prev_mid, next_mid, self.pending.post_price, self.config.sim)
+            filled, fill_px, fee_pct = limit_buy_fill(
+                prev_mid, next_mid, self.pending.post_price, self.config.sim,
+                next_ask=next_ask, abs_volume_at_window=abs_volume,
+            )
             if not filled:
                 return False, False, 0.0, False
             if self.position.side == PositionSide.FLAT:
@@ -316,7 +393,10 @@ class MomoDkrEnv(gym.Env):
                 realized = self._close_position(fill_px, fee_pct, slippage_pct=0.0)
                 closed = True
         elif self.pending.side == PositionSide.SHORT:
-            filled, fill_px, fee_pct = limit_sell_fill(prev_mid, next_mid, self.pending.post_price, self.config.sim)
+            filled, fill_px, fee_pct = limit_sell_fill(
+                prev_mid, next_mid, self.pending.post_price, self.config.sim,
+                next_bid=next_bid, abs_volume_at_window=abs_volume,
+            )
             if not filled:
                 return False, False, 0.0, False
             if self.position.side == PositionSide.FLAT:
@@ -334,28 +414,43 @@ class MomoDkrEnv(gym.Env):
         next_ask: float,
         next_mid: float,
         recent_volume_usd: float,
+        next_idx: int,
     ) -> tuple[bool, float, bool]:
         opened = False
         realized = 0.0
         closed = False
         notional = self.account.nav_usd * self.config.max_position_notional_pct * self.config.sim.leverage
+        symbol = self._resolve_symbol()
+        ask_depth = self._ask_depth_tuple(next_idx)
+        bid_depth = self._bid_depth_tuple(next_idx)
         if act == Action.MKT_BUY:
             if self.position.side == PositionSide.FLAT:
-                fill, fee, slip = market_buy_fill_price(next_ask, next_mid, recent_volume_usd, notional, self.config.sim, self._rng)
+                fill, fee, slip = market_buy_fill_price(
+                    next_ask, next_mid, recent_volume_usd, notional, self.config.sim, self._rng,
+                    ask_depth_cumulative=ask_depth, symbol=symbol,
+                )
                 self._open_position(PositionSide.LONG, fill, fee, slip, notional)
                 opened = True
             elif self.position.side == PositionSide.SHORT:
-                fill, fee, slip = market_buy_fill_price(next_ask, next_mid, recent_volume_usd, notional, self.config.sim, self._rng)
+                fill, fee, slip = market_buy_fill_price(
+                    next_ask, next_mid, recent_volume_usd, notional, self.config.sim, self._rng,
+                    ask_depth_cumulative=ask_depth, symbol=symbol,
+                )
                 realized = self._close_position(fill, fee, slip)
                 closed = True
-            # else LONG: ignore (already long)
         elif act == Action.MKT_SELL:
             if self.position.side == PositionSide.FLAT:
-                fill, fee, slip = market_sell_fill_price(next_bid, next_mid, recent_volume_usd, notional, self.config.sim, self._rng)
+                fill, fee, slip = market_sell_fill_price(
+                    next_bid, next_mid, recent_volume_usd, notional, self.config.sim, self._rng,
+                    bid_depth_cumulative=bid_depth, symbol=symbol,
+                )
                 self._open_position(PositionSide.SHORT, fill, fee, slip, notional)
                 opened = True
             elif self.position.side == PositionSide.LONG:
-                fill, fee, slip = market_sell_fill_price(next_bid, next_mid, recent_volume_usd, notional, self.config.sim, self._rng)
+                fill, fee, slip = market_sell_fill_price(
+                    next_bid, next_mid, recent_volume_usd, notional, self.config.sim, self._rng,
+                    bid_depth_cumulative=bid_depth, symbol=symbol,
+                )
                 realized = self._close_position(fill, fee, slip)
                 closed = True
         return opened, realized, closed

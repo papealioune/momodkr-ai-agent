@@ -17,16 +17,20 @@ def _cfg(**overrides) -> SimulatorConfig:
     base = dict(
         fee_taker_bps=3.5,
         fee_maker_bps=1.0,
-        slippage_c=0.001,
-        latency_bps_min=5.0,
-        latency_bps_max=20.0,
         fee_noise_pct=0.0,
+        slippage_c=0.001,
         slippage_noise_pct=0.0,
-        funding_interval_ticks=288_000,
+        latency_ticks_min=0,
+        latency_ticks_max=0,
+        walk_book=False,                 # unit-test legacy path
+        trade_through_limit_fills=False,  # legacy mid-move heuristic
         limit_fill_threshold_bps=1.0,
         limit_max_age_ticks=10,
+        funding_interval_ticks=288_000,
         liq_maintenance_margin=0.03,
         leverage=6,
+        tick_size_by_symbol={},
+        default_tick_size=0.0,
     )
     base.update(overrides)
     return SimulatorConfig(**base)

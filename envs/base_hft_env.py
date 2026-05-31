@@ -7,7 +7,8 @@ owns the gym.Env interface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 
@@ -89,3 +90,47 @@ class AccountState:
         if self.peak_nav_usd <= 0:
             return 0.0
         return max(0.0, (self.peak_nav_usd - self.nav_usd) / self.peak_nav_usd)
+
+
+@dataclass
+class DelayedAction:
+    action: int
+    execute_at_tick: int
+    issued_at_tick: int
+
+
+@dataclass
+class ActionQueue:
+    """FIFO of agent actions awaiting their post-latency execution.
+
+    The env owns one of these and calls push() on every non-HOLD action.
+    Each step it calls pop_ready(cursor) to drain actions whose latency
+    has elapsed. Cancellations (when the agent overrides a stale order in
+    flight) are tracked for the churn penalty.
+    """
+
+    queue: deque[DelayedAction] = field(default_factory=deque)
+    cancellations: int = 0
+
+    def push(self, action: int, execute_at_tick: int, issued_at_tick: int) -> None:
+        self.queue.append(DelayedAction(action=action, execute_at_tick=execute_at_tick, issued_at_tick=issued_at_tick))
+
+    def pop_ready(self, current_tick: int) -> list[DelayedAction]:
+        ready: list[DelayedAction] = []
+        while self.queue and self.queue[0].execute_at_tick <= current_tick:
+            ready.append(self.queue.popleft())
+        return ready
+
+    def cancel_all(self) -> int:
+        n = len(self.queue)
+        self.cancellations += n
+        self.queue.clear()
+        return n
+
+    def reset(self) -> None:
+        self.queue.clear()
+        self.cancellations = 0
+
+    @property
+    def n_in_flight(self) -> int:
+        return len(self.queue)

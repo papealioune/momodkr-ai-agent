@@ -18,8 +18,23 @@ import pandas as pd
 import pytest
 
 from envs.base_hft_env import Action, PositionSide
+from envs.market_simulator import SimulatorConfig
 from envs.momodkr_env import EnvConfig, MomoDkrEnv
 from serving.feature_version import MARKET_FEATURE_NAMES
+
+
+def _instant_cfg(episode_length_ticks: int) -> EnvConfig:
+    sim = SimulatorConfig(
+        latency_ticks_min=0,
+        latency_ticks_max=0,
+        walk_book=False,
+        trade_through_limit_fills=False,
+        fee_noise_pct=0.0,
+        slippage_noise_pct=0.0,
+        tick_size_by_symbol={},
+        default_tick_size=0.0,
+    )
+    return EnvConfig(episode_length_ticks=episode_length_ticks, sim=sim)
 
 
 def _trending_episode(n: int = 20_000, drift_bps_per_tick: float = 1.0, seed: int = 0) -> pd.DataFrame:
@@ -66,7 +81,7 @@ def _run_always_long(env: MomoDkrEnv) -> tuple[float, float]:
 
 
 def test_overfit_smoke_always_long_on_bullish_drift_is_profitable(bullish_episode: Path) -> None:
-    env = MomoDkrEnv(bullish_episode, EnvConfig(episode_length_ticks=5_000))
+    env = MomoDkrEnv(bullish_episode, _instant_cfg(5_000))
     cum_reward, final_nav = _run_always_long(env)
     assert cum_reward > 0, f"carrot reward never went positive: cum={cum_reward}"
     assert final_nav > env.config.initial_nav_usd, f"NAV did not grow: {final_nav} vs initial {env.config.initial_nav_usd}"
@@ -74,7 +89,7 @@ def test_overfit_smoke_always_long_on_bullish_drift_is_profitable(bullish_episod
 
 def test_overfit_smoke_drawdown_kill_doesnt_fire_on_bullish_drift(bullish_episode: Path) -> None:
     """Strong uptrend + always-long should never trip the 5% DD kill."""
-    env = MomoDkrEnv(bullish_episode, EnvConfig(episode_length_ticks=5_000))
+    env = MomoDkrEnv(bullish_episode, _instant_cfg(5_000))
     env.reset(seed=0)
     _, _, terminated, _, info = env.step(int(Action.MKT_BUY))
     while not terminated:
@@ -86,7 +101,7 @@ def test_overfit_smoke_drawdown_kill_doesnt_fire_on_bullish_drift(bullish_episod
 
 def test_overfit_smoke_always_short_on_bullish_drift_loses_money(bullish_episode: Path) -> None:
     """Sanity check the other side: shorting a bullish market should bleed."""
-    env = MomoDkrEnv(bullish_episode, EnvConfig(episode_length_ticks=2_000))
+    env = MomoDkrEnv(bullish_episode, _instant_cfg(2_000))
     env.reset(seed=0)
     _, r, terminated, truncated, _ = env.step(int(Action.MKT_SELL))
     cum_reward = r

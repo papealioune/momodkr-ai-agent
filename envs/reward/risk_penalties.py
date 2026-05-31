@@ -24,6 +24,12 @@ class RiskPenaltyConfig:
     losing_streak_coeff: float = 0.05
     losing_streak_offset: int = 2
     per_entry_cost: float = 0.02
+    # Churn discourages cancel-then-replace spam (live rate-limit risk).
+    churn_penalty: float = 0.005
+    # Peak-to-trough drawdown penalty on the OPEN position. Forces tight
+    # intrinsic stops instead of "hold and hope".
+    peak_dd_coeff: float = 0.5
+    peak_dd_threshold: float = 0.005  # 50 bps from peak (leveraged)
     reward_floor: float = -5.0
 
 
@@ -56,6 +62,38 @@ def per_entry_cost(opening_trade_this_step: bool, cfg: RiskPenaltyConfig) -> flo
     if not opening_trade_this_step:
         return 0.0
     return -cfg.per_entry_cost
+
+
+def churn_penalty(n_cancellations_this_step: int, cfg: RiskPenaltyConfig) -> float:
+    """Subtract a flat penalty for each in-flight order cancelled this step.
+
+    A cancel happens when the agent issues a new action that supersedes a
+    previously-queued (still pending) action, or explicitly cancels a
+    resting limit.
+    """
+    if n_cancellations_this_step <= 0:
+        return 0.0
+    return -cfg.churn_penalty * float(n_cancellations_this_step)
+
+
+def peak_drawdown_penalty(
+    current_unrealized_pct: float,
+    peak_unrealized_pct: float,
+    has_position: bool,
+    cfg: RiskPenaltyConfig,
+) -> float:
+    """Penalise the agent when the OPEN position has given back more than
+    peak_dd_threshold of its prior peak unrealised PnL.
+
+    excess = max(0, peak - current - threshold). Penalty = -coeff * excess.
+    Returns 0 when flat or when current > peak - threshold.
+    """
+    if not has_position:
+        return 0.0
+    excess = peak_unrealized_pct - current_unrealized_pct - cfg.peak_dd_threshold
+    if excess <= 0:
+        return 0.0
+    return -cfg.peak_dd_coeff * float(excess)
 
 
 def apply_floor(reward: float, cfg: RiskPenaltyConfig) -> float:

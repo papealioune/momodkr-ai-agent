@@ -45,14 +45,24 @@ max_position_notional_pct: 0.17   # 6× × 17% ≈ 100% notional (moleapp V9 saf
 liquidation_maintenance_margin: 0.03
 
 simulator:
-  fee_taker_bps: 3.5
-  fee_maker_bps: 1.0
-  slippage_model: sqrt_kyle
-  slippage_c: 0.001
-  latency_bps_uniform: [5, 20]
+  fee_taker_bps: 3.5          # Hyperliquid live taker tier
+  fee_maker_bps: 1.0          # Hyperliquid live maker tier
   fee_noise_pct: 0.05
+  walk_book: true             # walk bookDepth %-levels for VWAP fills when available
+  slippage_c: 0.001            # sqrt-Kyle fallback when bookDepth missing
   slippage_noise_pct: 0.20
-  funding_interval_ticks: 288000   # 8h @ 100ms ticks
+  latency_ticks_min: 1         # 100ms minimum
+  latency_ticks_max: 5         # 500ms maximum (covers typical agent->HL p99)
+  trade_through_limit_fills: true   # require next_ask <= post_bid (pessimistic FIFO)
+  limit_fill_threshold_bps: 1.0     # used only when trade_through is false
+  limit_max_age_ticks: 10
+  funding_interval_ticks: 288000    # 8h @ 100ms ticks
+  liq_maintenance_margin: 0.03
+  # Hyperliquid per-symbol tick sizes (USD). Update from venue API as needed.
+  tick_size_by_symbol:
+    BTCUSDT: 0.5
+    ETHUSDT: 0.05
+    SOLUSDT: 0.01
 
 episode:
   length_ticks: 9000               # 15 minutes @ 100ms
@@ -69,4 +79,7 @@ reward:
   losing_streak_coeff: 0.05
   losing_streak_offset: 2
   unrealized_breadcrumb_coeff: 0.3
+  churn_penalty: 0.005           # per-cancellation flat cost (rate-limit deterrent)
+  peak_dd_coeff: 0.5             # peak-to-trough drawdown penalty on open position
+  peak_dd_threshold: 0.005       # 50 bps from peak (leveraged) before penalty fires
   reward_floor: -5.0
