@@ -7,7 +7,7 @@ This is the Claude operating manual for the MomoDkr AI agent project — an HFT 
 - **Single-agent RL** (no MARL — proven dead end in moleapp; use hard-coded Governor for risk)
 - **PPO** via Stable-Baselines3 (not RLlib — cleaner ONNX export path)
 - **Discrete(5) action space**: `{hold, mkt_buy, mkt_sell, post_bid, post_ask}` — sizing handled by Governor (Kelly-capped), not learned
-- **CNN+LSTM policy** — book-depth spatial + microstructure temporal
+- **MLP policy** (no CNN, no LSTM) — hand-engineered microstructure features into flat vector; cleaner ONNX export, faster inference, simpler debugging
 - **Universe v1**: BTC, ETH, SOL only (no HYPE tokens until v2)
 - **Leverage**: 6× — trained at ceiling per moleapp rule
 - **Execution**: Rust ONNX engine signs EIP-712 → Hyperliquid L1 via API agent wallet (trade-only, no withdraw)

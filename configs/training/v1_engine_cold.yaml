@@ -2,7 +2,7 @@ run_name: v1-engine-cold
 seed: [42, 43, 44]
 
 algo: ppo
-policy: MultiInputLstmPolicy
+policy: MlpPolicy
 total_timesteps: 20_000_000
 n_steps: 2048
 batch_size: 512
@@ -23,10 +23,10 @@ vf_coef: 0.5
 max_grad_norm: 0.5
 
 policy_kwargs:
-  cnn_arch: [32, 64, 64]
-  lstm_hidden_size: 128
-  lstm_num_layers: 1
-  mlp_extractor_arch: [128, 64]
+  net_arch:
+    pi: [256, 256, 128]
+    vf: [256, 256, 128]
+  activation_fn: tanh
   ortho_init: true
 
 env_id: MomoDkrEnv-v1

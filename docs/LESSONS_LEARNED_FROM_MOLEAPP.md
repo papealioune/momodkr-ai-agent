@@ -219,7 +219,7 @@ These moleapp decisions do NOT apply to MomoDkr:
 
 - **RLlib / Ray** — MomoDkr uses SB3 (cleaner ONNX, no MARL needed)
 - **Box(7) continuous action space** — MomoDkr uses Discrete(5)
-- **3-layer MLP** — MomoDkr uses CNN+LSTM (L2 microstructure requires it)
+- **3-layer MLP** is actually carried forward — MomoDkr uses MLP (256/256/128 tanh, mirroring moleapp). Originally planned CNN+LSTM for raw L2; pivoted to hand-engineered microstructure features into flat vector for cleaner ONNX export and faster inference.
 - **15-min OHLCV bars** — MomoDkr uses 100ms L2 order book snapshots
 - **AWS Secrets Manager / 1Password** — MomoDkr uses Akeyless (per user preference)
 - **MARL "Prop Firm" architecture** — MomoDkr is single-agent

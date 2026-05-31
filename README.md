@@ -8,8 +8,8 @@ See [docs/LESSONS_LEARNED_FROM_MOLEAPP.md](docs/LESSONS_LEARNED_FROM_MOLEAPP.md)
 Phase 0 — repo bootstrap.
 
 ## Stack
-- **RL**: Stable-Baselines3 PPO, CNN+LSTM policy, Discrete(5) action space
-- **Data**: Binance Vision L2 depth + aggTrade @ 100ms snapshots, top-10 levels
+- **RL**: Stable-Baselines3 PPO, MLP policy (256/256/128 tanh), Discrete(5) action space
+- **Data**: Binance Vision bookTicker + aggTrades + bookDepth @ 100ms aggregated snapshots → hand-engineered microstructure feature vector (~30 dims)
 - **Universe (v1)**: BTC, ETH, SOL
 - **Leverage**: 6× (trained at ceiling)
 - **Execution**: Rust + `ort` + `alloy`/`ethers-rs` for EIP-712

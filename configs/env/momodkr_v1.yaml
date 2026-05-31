@@ -1,11 +1,39 @@
 env:
   symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
-  book_depth: 10
   obs:
-    cnn_shape: [4, 10, 50]      # channels=[bid_size, ask_size, bid_dprice, ask_dprice], depth=10, lookback=50 ticks (5s @ 100ms)
-    lstm_seq_len: 50
-    lstm_scalar_dim: 12         # OFI, micro-price, momentum_100ms/500ms/1s, funding_cum, pos_size, pos_pnl_pct, hold_ticks, ...
     feature_version: "0.1.0"
+    flat_vector_dim: 30
+    features:
+      - ofi_1s
+      - ofi_5s
+      - ofi_30s
+      - micro_price_log_ret
+      - log_spread_bps
+      - top1_size_imbalance
+      - bid_depth_pct_neg_0_1
+      - bid_depth_pct_neg_0_2
+      - bid_depth_pct_neg_0_5
+      - bid_depth_pct_neg_1_0
+      - ask_depth_pct_pos_0_1
+      - ask_depth_pct_pos_0_2
+      - ask_depth_pct_pos_0_5
+      - ask_depth_pct_pos_1_0
+      - realized_vol_5s
+      - realized_vol_30s
+      - realized_vol_5min
+      - trade_flow_imb_1s
+      - trade_flow_imb_5s
+      - trade_flow_imb_30s
+      - funding_cumulative
+      - funding_8h_rate
+      - hour_of_day_sin
+      - hour_of_day_cos
+      - day_of_week_sin
+      - day_of_week_cos
+      - pos_signed_notional_pct
+      - pos_unrealized_pnl_pct
+      - pos_hold_ticks_norm
+      - pos_peak_unrealized_pct
 
 action:
   type: discrete
