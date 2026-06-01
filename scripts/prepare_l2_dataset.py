@@ -230,7 +230,11 @@ def main() -> None:
     bad = [r for r in results if not r.validator_passed]
     logger.info("validated %d/%d days", len(ok), len(results))
     for r in bad[:10]:
-        logger.error("FAILED %s %s: %s", r.symbol, r.day, r.error or r.validator_summary.splitlines()[0])
+        # surface the first 5 lines of the validator's summary so the actual
+        # gate that fired (NaN / crossed_book / snapshot_gap / etc) is visible
+        # in the log, not just the generic "validation failed" header
+        summary_head = "\n  ".join(r.validator_summary.splitlines()[:5])
+        logger.error("FAILED %s %s: %s\n  %s", r.symbol, r.day, r.error or "validation failed", summary_head)
     if bad:
         sys.exit(f"{len(bad)} day(s) failed validation")
 

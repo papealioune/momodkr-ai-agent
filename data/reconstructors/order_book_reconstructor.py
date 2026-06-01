@@ -48,8 +48,14 @@ class ReconstructionInputs:
 
 
 def _grid_timestamps(start_ms: int, end_ms: int, grid_ms: int) -> np.ndarray:
-    start_aligned = (start_ms // grid_ms) * grid_ms
-    end_aligned = ((end_ms // grid_ms) + 1) * grid_ms
+    # CEIL start to next grid -- ensures the FIRST grid tick has a valid as-of
+    # bookTicker observation (rounding DOWN would put grid_ts[0] BEFORE the first
+    # quote and asof_align would emit NaN there, failing the NaN gate downstream).
+    start_aligned = ((start_ms + grid_ms - 1) // grid_ms) * grid_ms
+    # FLOOR end to previous grid -- symmetric so the last tick is also asof-valid.
+    end_aligned = (end_ms // grid_ms) * grid_ms
+    if end_aligned < start_aligned:
+        return np.array([], dtype=np.int64)
     return np.arange(start_aligned, end_aligned + 1, grid_ms, dtype=np.int64)
 
 
@@ -204,6 +210,11 @@ def reconstruct(
     out = out.join(depth.drop(columns="ts_ms"))
     out["funding_rate"] = funding.to_numpy()
 
+    # Safety net: drop any leading/trailing rows where the asof-align couldn't
+    # find a valid bookTicker quote. With the ceil/floor grid alignment above
+    # this should never fire, but if a future input has internal gaps we'd
+    # rather lose those ticks than poison the whole day's validation.
+    out = out.dropna(subset=["bid_px", "ask_px", "mid"]).reset_index(drop=True)
     return out
 
 

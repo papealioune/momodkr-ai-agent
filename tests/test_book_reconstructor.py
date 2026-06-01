@@ -117,6 +117,39 @@ def test_reconstruct_produces_uniform_grid_and_no_nans_in_quotes() -> None:
     assert (snaps["mid"] <= snaps["ask_px"]).all()
 
 
+def test_reconstruct_no_nan_when_first_bookticker_ts_not_grid_aligned() -> None:
+    """Regression: real Binance bookTicker first ts is rarely a multiple of 100ms.
+    Without ceil-up grid alignment, grid_ts[0] precedes the first quote and the
+    asof-align emits NaN -- the validator's NaN gate then fails the entire day.
+    """
+    # First ts is 1_700_000_000_037 -- NOT divisible by 100. Flooring start_ms
+    # to a 100ms grid would put grid_ts[0] = 1_700_000_000_000 (37ms BEFORE the
+    # first quote) and force NaN at row 0.
+    bt = pd.DataFrame(
+        {
+            "ts_ms": (1_700_000_000_037 + np.arange(200) * 47).astype("int64"),
+            "bid_px": np.full(200, 99.5),
+            "bid_sz": np.full(200, 1.0),
+            "ask_px": np.full(200, 100.5),
+            "ask_sz": np.full(200, 1.0),
+        }
+    )
+    inputs = ReconstructionInputs(
+        book_ticker=bt,
+        agg_trades=_agg_trades(n=30, start_ms=1_700_000_000_037),
+        book_depth=_book_depth(start_ms=1_700_000_000_037),
+        funding=None,
+    )
+    snaps = reconstruct(inputs)
+    assert len(snaps) > 0
+    # The leading-edge NaN bug would manifest here.
+    for col in ("bid_px", "ask_px", "mid", "micro_price"):
+        assert not snaps[col].isna().any(), f"NaN in {col} at grid edge"
+    # grid_ts[0] should now be CEIL'd to the next multiple of 100ms.
+    assert int(snaps["ts_ms"].iloc[0]) % 100 == 0
+    assert int(snaps["ts_ms"].iloc[0]) >= int(bt["ts_ms"].iloc[0])
+
+
 def test_reconstruct_empty_book_ticker_raises() -> None:
     empty = pd.DataFrame(columns=["ts_ms", "bid_px", "bid_sz", "ask_px", "ask_sz"])
     inputs = ReconstructionInputs(
