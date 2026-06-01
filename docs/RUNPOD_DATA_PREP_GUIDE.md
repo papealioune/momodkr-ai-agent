@@ -48,6 +48,18 @@ Optional overrides (defaults in [`.env.example`](../.env.example)):
 > `momodkr-data` bucket. In Cloudflare's R2 token creation UI: choose
 > "Specify bucket(s) → `momodkr-data`" and "Permissions → Object Read &
 > Write". Account-wide tokens work too but aren't necessary.
+>
+> **IP allowlist gotcha:** if you set "Client IP Address Filtering" on
+> the R2 token, you MUST use the pod's **outbound HTTPS egress IP**,
+> not the SSH host IP that RunPod shows you. They are different IPs.
+> Get the real egress IP from inside the pod:
+> ```bash
+> curl -s https://ifconfig.me
+> ```
+> Then add that exact IP to the token's allowlist. RunPod pods can
+> migrate to different hosts on restart (changing the egress IP), so
+> the safe default is "Allow all IPs" on the token and rely on the
+> bucket scope + Object R/W permission for security.
 
 ## 2. Clone the repo + bootstrap
 
@@ -244,3 +256,5 @@ Otherwise: same pod, two phases, one bill.
 | `bg.sh` says "session already exists" | Old job still running (or zombie pane after exit) | `tmux attach -t <name>` to check; `tmux kill-session -t <name>` if dead |
 | `tmux: command not found` | setup.sh didn't run or wasn't a Debian/Ubuntu image | `apt-get update && apt-get install -y tmux` (or yum) — then re-run setup |
 | Reattach shows just `=== job exited, press any key ===` | Job finished while you were disconnected | The log under `/workspace/logs/<name>.log` has the full history; press a key to close the pane |
+| R2 token has IP allowlist set; setup.sh still 403s after token + bucket are clearly right | The IP you allowed is RunPod's SSH proxy / your laptop, NOT the pod's outbound IP | Inside the pod: `curl -s https://ifconfig.me` → add THAT IP to the token's Client IP Filtering, or just remove the IP filter entirely (default-safe given the bucket-scoped Read/Write token) |
+| `R2_BUCKET_NAME=moleapp-rl-data` stuck in env across `unset` attempts | Pod Settings → Environment Variables still has the old override; the `unset` only affects current shell | RunPod UI → Pod → Edit → Environment Variables → remove the row or change to `momodkr-data` → restart the pod |
