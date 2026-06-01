@@ -272,13 +272,26 @@ def parse_and_persist(
     dataset_root: Path,
     overwrite: bool = False,
     max_workers: int | None = None,
+    max_tasks_per_child: int = 25,
     progress_every: int = 100,
 ) -> dict[FetchTask, Path]:
     """Parse each downloaded ZIP into a per-day Parquet under dataset_root, in parallel.
 
     CPU-bound (unzip + pandas + zstd) so ProcessPoolExecutor is the right
-    tool; ThreadPoolExecutor would be GIL-bound. Default max_workers picks
-    min(cpu_count, n_pending) so we don't spawn idle processes.
+    tool; ThreadPoolExecutor would be GIL-bound.
+
+    Default max_workers picks a CONSERVATIVE 8 instead of all cores. Some
+    bookTicker days decompress to multi-GB pandas DataFrames; 16+ workers
+    each holding one at peak can blow through the container's RAM quota
+    and crash with BrokenProcessPool. Override via the PARSE_WORKERS env
+    var if you know your memory headroom.
+
+    max_tasks_per_child=25 forces each worker to be recycled after 25
+    tasks. Python's allocator doesn't return memory to the OS even after
+    DataFrames are GC'd, so without recycling each worker's RSS grows
+    monotonically toward its largest-DataFrame high-water mark. Recycling
+    keeps the floor low without hurting throughput (process spawn is
+    fast vs the per-task work).
 
     Emits a progress line every `progress_every` files so long parses
     aren't silent.
@@ -304,8 +317,18 @@ def parse_and_persist(
     if not pending:
         return out
 
-    n_workers = max_workers or min(os.cpu_count() or 4, len(pending), 16)
-    logger.info("parsing %d ZIPs with %d processes...", len(pending), n_workers)
+    # Resolution order: explicit arg > PARSE_WORKERS env > conservative default 8
+    env_workers = os.environ.get("PARSE_WORKERS")
+    if max_workers is None and env_workers:
+        try:
+            max_workers = int(env_workers)
+        except ValueError:
+            logger.warning("ignoring non-integer PARSE_WORKERS=%r", env_workers)
+    n_workers = max_workers or min(os.cpu_count() or 4, len(pending), 8)
+    logger.info(
+        "parsing %d ZIPs with %d processes (max_tasks_per_child=%d)...",
+        len(pending), n_workers, max_tasks_per_child,
+    )
 
     # Build {(sym, stream, day_iso) -> FetchTask} so we can map results back.
     by_key: dict[tuple[str, str, str], FetchTask] = {}
@@ -321,10 +344,20 @@ def parse_and_persist(
 
     done = 0
     failed = 0
-    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=max_tasks_per_child) as ex:
         futures = [ex.submit(_parse_one, *args) for args in args_list]
         for fut in as_completed(futures):
-            sym, stream, day_iso, dest_or_err = fut.result()
+            try:
+                sym, stream, day_iso, dest_or_err = fut.result()
+            except Exception as e:
+                # A worker died (BrokenProcessPool / OOM-kill / segfault).
+                # Surface it but keep going: the remaining futures may still
+                # land if the pool can recover; otherwise the outer loop
+                # will eventually drain or re-raise.
+                logger.error("parse worker crashed: %s", e)
+                failed += 1
+                done += 1
+                continue
             key = (sym, stream, day_iso)
             task = by_key.get(key)
             if dest_or_err and not dest_or_err.startswith("ERR:") and task is not None:
