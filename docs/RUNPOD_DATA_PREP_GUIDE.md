@@ -5,15 +5,34 @@ on a RunPod CPU pod, from Binance Vision raw ZIPs through the
 26-feature episode parquets + train-only normalisation stats ready for
 PPO. Total wall time ≈ 8-16 hours; total disk ≈ 700 GB.
 
-## 1. Provision the pod
+## 1. Provision the pod — pick once, use for both phases
+
+**Strategy:** spin up a single **GPU Pod** sized for the training run
+(Phase 4+) and use it for ingest too. The GPU sits idle during ingest
+but you avoid migrating data between pods and the per-hour CPU/RAM
+ratio on a GPU Pod is often better than the equivalent fixed CPU Pod
+preset. Tear it down only when the training run is finished — or when
+a retraining cycle clearly needs different hardware.
 
 | Spec | Value |
 |---|---|
-| Pod type | **CPU** (no GPU needed for ingest) |
-| vCPU | 16-32 |
-| RAM | 32-64 GB |
+| Pod type | **GPU Pod** (cheapest available with the CPU/RAM below) |
+| GPU | RTX 4080 / RTX 4090 / A4000 Ada — moleapp lesson 3.5: A100/H100 is wasted money on small-net PPO. Pick on price, not specs. |
+| vCPU | **≥ 8** (ingest uses ~12 of 8 download + 4 reconstruct workers; 8 cores is the floor) |
+| RAM | **≥ 24 GB** (peak ~20-25 GB during parallel bookTicker reconstruction). 32 GB is the sweet spot. |
 | Storage | **1 TB persistent volume** mounted at `/workspace` |
-| Region | EU or US — closest to your dev box; the bottleneck is Binance Vision throughput, not the pod |
+| Region | Closest to your dev box for SSH latency; Binance Vision egress is region-agnostic |
+
+> **RunPod menu reality:** CPU Pod presets are fixed (8/32, 16/96 — exact
+> pairings rotate per region). If a small GPU Pod happens to give you
+> ≥ 8 vCPU + ≥ 24 GB at a price competitive with the CPU Pod options,
+> take the GPU Pod — you'll already be there for training.
+>
+> **If your chosen pod has < 24 GB RAM**, lower the reconstruct
+> concurrency before launching: edit `runpod/run_ingest.sh` and set
+> `RECON_WORKERS=2` (or pass `--reconstruct-workers 2` to
+> `scripts/prepare_l2_dataset.py`). The ingest still completes, just
+> ~1.5× slower.
 
 Once the pod is up, edit Pod Settings → Environment Variables and add:
 
@@ -181,19 +200,32 @@ PY
 If the env errors with "no norm_stats.json", Phase 2 didn't write the
 stats — re-run `build_features` and check the log.
 
-## 7. Tear down the pod
+## 7. Belt-and-braces R2 reconciliation (~5 min)
 
-The dataset lives on R2, not on this pod's volume. You CAN tear down the
-pod once R2 sync confirms (the upload happens incrementally during the
-ingest). Optionally:
+R2 upload happens incrementally during the ingest. As insurance against
+the daemon missing a file:
 
 ```bash
-# Belt-and-braces: re-upload everything in case the daemon missed any files
 python -m scripts.r2_sync upload --local data/episodes
 python -m scripts.r2_sync upload --local data/datasets --filter snapshots
 ```
 
-You're now ready for the [Training guide](RUNPOD_TRAINING_GUIDE.md).
+## 8. Keep the pod alive — head straight to training
+
+**Do not tear down the pod.** The next step is training on this exact
+machine — the dataset is already on local disk and on R2, and you've
+already paid for setup. Skip directly to
+[RUNPOD_TRAINING_GUIDE.md §3 onwards](RUNPOD_TRAINING_GUIDE.md#3-pull-episodes-from-r2-5-min-10-gb)
+(skip §1-2 — same pod, same env vars, already bootstrapped).
+
+When you'd tear down + spin up fresh hardware:
+- The training run is finished and you've uploaded the ONNX + bundle to R2.
+- A retrain cycle needs clearly different hardware (e.g. went from
+  single-symbol to staged curriculum and need a fatter GPU, or pivoted
+  to a model architecture that wants more VRAM).
+- The pod has been idle for > 24h (stop the bleeding).
+
+Otherwise: same pod, two phases, one bill.
 
 ## Troubleshooting
 

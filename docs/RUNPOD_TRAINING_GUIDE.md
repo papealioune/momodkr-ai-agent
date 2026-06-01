@@ -6,17 +6,32 @@ baked in, and gating it through the moleapp parity rule. Assumes
 [Data Prep](RUNPOD_DATA_PREP_GUIDE.md) is complete and episodes live at
 `s3://moleapp-rl-data/momodkr/episodes/<SYM>/0.1.0/`.
 
-## 1. Provision the pod
+## 1. Pod — reuse the data-prep pod by default
+
+**Default path:** you're already on the pod you spun up in
+[Data Prep §1](RUNPOD_DATA_PREP_GUIDE.md#1-provision-the-pod--pick-once-use-for-both-phases).
+The episode parquets are on local disk and on R2, the env is
+bootstrapped, R2 creds are set. Skip §2 and go to §3.
+
+**Only spin up a fresh pod if** one of these is true:
+- You're starting from a previous training run on R2 (no local data on this pod).
+- Retraining cycle: the previous model is in production; you need to
+  iterate on a clean machine without disrupting the live ONNX.
+- You discovered the data-prep pod is undersized for training (rare —
+  see specs below).
+
+If you ARE starting fresh, target these specs (same shape as data prep,
+plus W&B):
 
 | Spec | Value |
 |---|---|
-| Pod type | **GPU** — RTX 4080 or 4090 (moleapp lesson 3.5: A100/H100 wastes money on small-net PPO) |
-| vCPU | 16-32 (env step throughput matters more than GPU class) |
-| RAM | 32-64 GB |
+| Pod type | **GPU Pod** — RTX 4080 / RTX 4090 / A4000 Ada (moleapp lesson 3.5: A100/H100 wastes money on small-net PPO) |
+| vCPU | ≥ 12 (env step throughput matters more than GPU class) |
+| RAM | ≥ 32 GB |
 | Storage | 200 GB persistent volume at `/workspace` (episodes only — raw L2 stays on R2) |
 | Region | Same as the data prep pod's region — R2 download is fastest there |
 
-Pod env vars:
+Pod env vars (already set if you reused the data-prep pod):
 
 ```
 R2_ACCESS_KEY_ID=<moleapp R2 access key>
@@ -282,11 +297,22 @@ The Rust feature_builder loads `policy.bundle.json` into a
 `HashMap<Symbol, NormStats>` once at startup and z-scores raw market
 features per-symbol before each ONNX call.
 
-## 10. Tear down the pod
+## 10. Tear down — or keep alive for the next iteration
 
-Backups are on R2. The pod can be terminated. The next stage is the
-[Rust inference engine](../execution/rust_engine/) which loads the
-ONNX, ingests Hyperliquid l2Book WebSocket, and signs EIP-712.
+Backups are on R2; the pod is safe to terminate. Keep it alive if:
+- You're iterating on reward wrappers / hyperparameters and will
+  re-launch walk-forward within a few hours (saves bootstrap time).
+- You want to keep the Rust engine ([Phase 7](../execution/rust_engine/))
+  development environment on the same host while it consumes the ONNX.
+
+Terminate it when:
+- ONNX + bundle are uploaded to R2 and you're done iterating on this
+  model version.
+- The next step is a clearly different hardware tier (e.g. multi-GPU
+  for a curriculum run, or pure CPU for inference work).
+
+When you re-spin a fresh pod later, repeat from §1 of [Data Prep](RUNPOD_DATA_PREP_GUIDE.md)
+if the episodes need pulling from R2, otherwise from §2 here.
 
 ## Troubleshooting
 
