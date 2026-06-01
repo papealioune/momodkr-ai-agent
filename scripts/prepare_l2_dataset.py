@@ -86,15 +86,35 @@ def _upload_symbol_streams(
     symbol: str,
     dataset_root: Path,
     streams: tuple[str, ...],
+    day_iso: str | None = None,
     overwrite: bool = False,
 ) -> int:
-    """Upload all per-day parquets for a symbol's streams to R2 under momodkr/<SYMBOL>/<stream>/."""
+    """Upload per-day parquets for a symbol's streams to R2.
+
+    If `day_iso` is provided, only files for that exact day are uploaded.
+    This is the per-worker path used during the ingest -- avoids the
+    TOCTOU race where multiple ProcessPool workers each try to upload
+    the WHOLE symbol's history. Without day-scoping you get:
+      - N^2 head_object calls (each of N workers scans N day-files)
+      - occasional duplicate uploads when two workers race past the
+        head_object check at the same instant
+
+    When `day_iso` is None, falls back to "upload everything for this
+    symbol/stream" -- the right behaviour for the --upload-only catch-up
+    pass at end of `main()`.
+    """
     total = 0
     for stream in streams:
         d = dataset_root / symbol / stream
         if not d.exists():
             continue
-        total += upload_tree(dataset_root, filter_substr=f"{symbol}/{stream}/", overwrite=overwrite)
+        if day_iso is None:
+            filter_substr = f"{symbol}/{stream}/"
+        else:
+            # trailing "." disambiguates 2024-03-1 vs 2024-03-{0..9} and ensures
+            # we hit exactly <day_iso>.parquet, not a hypothetical sibling.
+            filter_substr = f"{symbol}/{stream}/{day_iso}."
+        total += upload_tree(dataset_root, filter_substr=filter_substr, overwrite=overwrite)
     return total
 
 
@@ -147,7 +167,10 @@ def _process_day(
 
     uploaded = False
     if upload:
-        _upload_symbol_streams(symbol, dataset_root, (*STREAMS, "snapshots"))
+        # Day-scoped: this worker only uploads its own (symbol, day) files.
+        # Avoids the N^2 head_object scan + the TOCTOU duplicate-upload race
+        # we saw in the test ingest log.
+        _upload_symbol_streams(symbol, dataset_root, (*STREAMS, "snapshots"), day_iso=day_iso)
         uploaded = True
 
     return DayResult(symbol, day, snapshot_path, True, summary, uploaded)

@@ -66,7 +66,14 @@ def get_client():
         endpoint_url=endpoint,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
-        config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "adaptive"}),
+        # max_pool_connections raised from boto3's default 10 -- the ingest
+        # uses ProcessPoolExecutor(4) with each worker spawning ThreadPoolExecutor(8)
+        # uploads, so 32 parallel sockets is the realistic peak.
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": 5, "mode": "adaptive"},
+            max_pool_connections=64,
+        ),
         region_name="auto",
     )
 
