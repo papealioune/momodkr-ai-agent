@@ -235,32 +235,109 @@ PARSERS = {
 }
 
 
+def _parse_one(
+    task_stream: str,
+    task_symbol: str,
+    task_day_iso: str,
+    src: str,
+    dest: str,
+    overwrite: bool,
+) -> tuple[str, str, str, str | None]:
+    """Worker: parse one ZIP -> parquet. Returns (symbol, stream, day_iso, dest_or_None_on_error).
+
+    Module-level + plain-str args so the function pickles cleanly under
+    ProcessPoolExecutor (FetchTask + Path don't always round-trip well
+    across the spawn boundary).
+    """
+    from pathlib import Path as _Path
+
+    parser = PARSERS.get(task_stream)
+    if parser is None:
+        return task_symbol, task_stream, task_day_iso, None
+    dest_path = _Path(dest)
+    if dest_path.exists() and not overwrite:
+        return task_symbol, task_stream, task_day_iso, dest
+    try:
+        df = parser(_Path(src))
+    except Exception as e:
+        # logging from worker subprocess is unreliable; surface error in retval
+        return task_symbol, task_stream, task_day_iso, f"ERR:{e!s}"
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(dest_path, index=False, compression="zstd")
+    return task_symbol, task_stream, task_day_iso, dest
+
+
 def parse_and_persist(
     fetched: dict[FetchTask, Path | None],
     dataset_root: Path,
     overwrite: bool = False,
+    max_workers: int | None = None,
+    progress_every: int = 100,
 ) -> dict[FetchTask, Path]:
-    """Parse each downloaded ZIP into a per-day Parquet under dataset_root."""
+    """Parse each downloaded ZIP into a per-day Parquet under dataset_root, in parallel.
+
+    CPU-bound (unzip + pandas + zstd) so ProcessPoolExecutor is the right
+    tool; ThreadPoolExecutor would be GIL-bound. Default max_workers picks
+    min(cpu_count, n_pending) so we don't spawn idle processes.
+
+    Emits a progress line every `progress_every` files so long parses
+    aren't silent.
+    """
+    import os
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    # Build pending list (skip None sources + already-existing dests)
+    pending: list[tuple[FetchTask, Path]] = []
     out: dict[FetchTask, Path] = {}
     for task, src in fetched.items():
         if src is None:
             continue
-        parser = PARSERS.get(task.stream)
-        if parser is None:
+        if PARSERS.get(task.stream) is None:
             logger.warning("no parser for stream %s", task.stream)
             continue
         dest = dataset_root / task.symbol / task.stream / f"{task.day.isoformat()}.parquet"
         if dest.exists() and not overwrite:
             out[task] = dest
             continue
-        try:
-            df = parser(src)
-        except Exception as e:
-            logger.error("parse failed %s: %s", src, e)
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(dest, index=False, compression="zstd")
-        out[task] = dest
+        pending.append((task, dest))
+
+    if not pending:
+        return out
+
+    n_workers = max_workers or min(os.cpu_count() or 4, len(pending), 16)
+    logger.info("parsing %d ZIPs with %d processes...", len(pending), n_workers)
+
+    # Build {(sym, stream, day_iso) -> FetchTask} so we can map results back.
+    by_key: dict[tuple[str, str, str], FetchTask] = {}
+    args_list: list[tuple[str, str, str, str, str, bool]] = []
+    for task, dest in pending:
+        key = (task.symbol, task.stream, task.day.isoformat())
+        by_key[key] = task
+        # src and dest are passed as strings for cross-process safety
+        # (we already filtered out None sources above)
+        src = fetched[task]
+        assert src is not None
+        args_list.append((task.stream, task.symbol, task.day.isoformat(), str(src), str(dest), overwrite))
+
+    done = 0
+    failed = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        futures = [ex.submit(_parse_one, *args) for args in args_list]
+        for fut in as_completed(futures):
+            sym, stream, day_iso, dest_or_err = fut.result()
+            key = (sym, stream, day_iso)
+            task = by_key.get(key)
+            if dest_or_err and not dest_or_err.startswith("ERR:") and task is not None:
+                out[task] = Path(dest_or_err)
+            else:
+                failed += 1
+                if dest_or_err and dest_or_err.startswith("ERR:"):
+                    logger.error("parse failed %s/%s/%s: %s", sym, stream, day_iso, dest_or_err[4:])
+            done += 1
+            if done % progress_every == 0:
+                logger.info("  parsed %d / %d (failed=%d)", done, len(pending), failed)
+
+    logger.info("parsing complete: %d ok / %d failed", len(pending) - failed, failed)
     return out
 
 
