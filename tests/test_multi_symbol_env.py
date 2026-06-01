@@ -29,7 +29,7 @@ def test_env_loads_multiple_parquets(tmp_path: Path) -> None:
     b = tmp_path / "eth.parquet"
     _episode(base_mid=50_000.0, seed=1).to_parquet(a, index=False)
     _episode(base_mid=3_000.0, seed=2).to_parquet(b, index=False)
-    env = MomoDkrEnv([a, b], EnvConfig(episode_length_ticks=200), seed=0)
+    env = MomoDkrEnv([a, b], EnvConfig(episode_length_ticks=200, apply_obs_normalisation=False), seed=0)
     assert env.parquet_paths == [a, b]
     assert len(env._features_pool) == 2
 
@@ -40,7 +40,7 @@ def test_env_reset_samples_active_index_from_pool(tmp_path: Path) -> None:
         p = tmp_path / f"sym_{i}.parquet"
         _episode(base_mid=base, seed=i).to_parquet(p, index=False)
         paths.append(p)
-    env = MomoDkrEnv(paths, EnvConfig(episode_length_ticks=200), seed=0)
+    env = MomoDkrEnv(paths, EnvConfig(episode_length_ticks=200, apply_obs_normalisation=False), seed=0)
     seen_indices: set[int] = set()
     for s in range(50):
         env.reset(seed=s)
@@ -52,7 +52,7 @@ def test_env_reset_samples_active_index_from_pool(tmp_path: Path) -> None:
 def test_single_parquet_backward_compat(tmp_path: Path) -> None:
     p = tmp_path / "btc.parquet"
     _episode().to_parquet(p, index=False)
-    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200), seed=0)
+    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, apply_obs_normalisation=False), seed=0)
     assert env.parquet_paths == [p]
     obs, info = env.reset(seed=0)
     assert obs.shape[0] > 0
@@ -67,4 +67,4 @@ def test_env_rejects_too_small_parquet_in_pool(tmp_path: Path) -> None:
     import pytest
 
     with pytest.raises(ValueError, match="rows"):
-        MomoDkrEnv([big, small], EnvConfig(episode_length_ticks=200), seed=0)
+        MomoDkrEnv([big, small], EnvConfig(episode_length_ticks=200, apply_obs_normalisation=False), seed=0)

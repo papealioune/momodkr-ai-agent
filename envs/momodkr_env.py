@@ -29,6 +29,12 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 
+from data.preprocessors.feature_stats import (
+    NormStats,
+    apply_zscore,
+    load_norm_stats,
+    norm_stats_path_for_episodes,
+)
 from envs.base_hft_env import (
     ACTION_LABELS,
     AccountState,
@@ -75,6 +81,15 @@ class EnvConfig:
     # infer it from the parquet filename (.../<SYMBOL>/...); override here for
     # synthetic test data.
     override_symbol: str | None = None
+    # When True, the env applies z-score normalisation to market features
+    # using the norm_stats.json that sits next to the train.parquet. The
+    # ONNX export bakes the same stats into the graph so train + live
+    # inference normalise identically. Set False for unit tests on
+    # synthetic data without persisted stats.
+    apply_obs_normalisation: bool = True
+    # Hard clip on the 4 position features so policy inputs stay bounded
+    # even under leverage-amplified extreme PnL excursions.
+    position_feature_clip: float = 3.0
 
 
 class MomoDkrEnv(gym.Env):
@@ -121,6 +136,7 @@ class MomoDkrEnv(gym.Env):
         self._sim_state_pool: list[dict[str, np.ndarray]] = []
         self._ts_ms_pool: list[np.ndarray] = []
         self._n_rows_pool: list[int] = []
+        self._norm_stats_pool: list[NormStats | None] = []
         for path in self.parquet_paths:
             if not path.exists():
                 raise FileNotFoundError(f"episode parquet not found: {path}")
@@ -138,10 +154,22 @@ class MomoDkrEnv(gym.Env):
                 raise ValueError(
                     f"episode parquet has {len(df)} rows, need > {self.config.episode_length_ticks + 1} ({path})"
                 )
+            stats: NormStats | None = None
+            if self.config.apply_obs_normalisation:
+                stats_path = norm_stats_path_for_episodes(path.parent)
+                if stats_path.exists():
+                    stats = load_norm_stats(stats_path)
+                else:
+                    raise FileNotFoundError(
+                        f"apply_obs_normalisation=True but no norm_stats.json next to {path} "
+                        f"(expected {stats_path}). Rebuild episodes with build_episodes() to materialise it, "
+                        f"or pass EnvConfig(apply_obs_normalisation=False) for tests on raw synthetic data."
+                    )
             self._features_pool.append(features)
             self._sim_state_pool.append(sim_state)
             self._ts_ms_pool.append(ts_ms)
             self._n_rows_pool.append(len(df))
+            self._norm_stats_pool.append(stats)
 
     # Convenience properties that always reflect the active episode.
     @property
@@ -159,6 +187,10 @@ class MomoDkrEnv(gym.Env):
     @property
     def _n_rows(self) -> int:
         return self._n_rows_pool[self._active_idx]
+
+    @property
+    def _norm_stats(self) -> NormStats | None:
+        return self._norm_stats_pool[self._active_idx]
 
     # ------------------------------------------------------------------ gym
 
@@ -488,6 +520,9 @@ class MomoDkrEnv(gym.Env):
     def _build_obs(self) -> np.ndarray:
         idx = min(self._cursor, self._n_rows - 1)
         market = self._features[idx]
+        stats = self._norm_stats
+        if stats is not None:
+            market = apply_zscore(market, stats)
         mark = float(self._sim_state["mid"][idx])
         unreal = self._unrealized_pnl_pct(mark)
         pos_features = np.array(
@@ -499,6 +534,10 @@ class MomoDkrEnv(gym.Env):
             ],
             dtype=np.float32,
         )
+        # Hard clip the position block -- leveraged unrealized can swing widely.
+        clip = float(self.config.position_feature_clip)
+        if clip > 0:
+            pos_features = np.clip(pos_features, -clip, clip)
         return np.concatenate([market, pos_features]).astype(np.float32)
 
     def _info(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:

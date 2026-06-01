@@ -96,6 +96,7 @@ def test_curriculum_runs_two_stage_smoke(tmp_path: Path) -> None:
         "leverage": 6,
         "max_position_notional_pct": 0.17,
         "initial_nav_usd": 10_000.0,
+        "apply_obs_normalisation": False,
         "episode": {"length_ticks": 200, "reset_on_dd": 0.05},
         "simulator": {
             "fee_taker_bps": 3.5,

@@ -73,7 +73,7 @@ def test_env_market_buy_delayed_by_latency_ticks(tmp_path: Path) -> None:
     p = tmp_path / "ep.parquet"
     _episode(n=1000).to_parquet(p, index=False)
     sim = SimulatorConfig(latency_ticks_min=3, latency_ticks_max=3, walk_book=False, trade_through_limit_fills=False, fee_noise_pct=0.0, slippage_noise_pct=0.0, tick_size_by_symbol={}, default_tick_size=0.0)
-    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim), seed=0)
+    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim, apply_obs_normalisation=False), seed=0)
     env.reset(seed=0)
     env.step(int(Action.MKT_BUY))
     assert env.position.side == PositionSide.FLAT
@@ -89,7 +89,7 @@ def test_env_zero_latency_executes_buy_immediately(tmp_path: Path) -> None:
     p = tmp_path / "ep.parquet"
     _episode(n=1000).to_parquet(p, index=False)
     sim = SimulatorConfig(latency_ticks_min=0, latency_ticks_max=0, walk_book=False, trade_through_limit_fills=False, fee_noise_pct=0.0, slippage_noise_pct=0.0, tick_size_by_symbol={}, default_tick_size=0.0)
-    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim), seed=0)
+    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim, apply_obs_normalisation=False), seed=0)
     env.reset(seed=0)
     env.step(int(Action.MKT_BUY))
     assert env.position.side == PositionSide.LONG
@@ -99,7 +99,7 @@ def test_env_records_cancellations_in_info(tmp_path: Path) -> None:
     p = tmp_path / "ep.parquet"
     _episode(n=1000).to_parquet(p, index=False)
     sim = SimulatorConfig(latency_ticks_min=5, latency_ticks_max=5, walk_book=False, trade_through_limit_fills=False, fee_noise_pct=0.0, slippage_noise_pct=0.0, tick_size_by_symbol={}, default_tick_size=0.0)
-    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim), seed=0)
+    env = MomoDkrEnv(p, EnvConfig(episode_length_ticks=200, sim=sim, apply_obs_normalisation=False), seed=0)
     env.reset(seed=0)
     env.step(int(Action.MKT_BUY))    # in-flight
     _, _, _, _, info = env.step(int(Action.MKT_SELL))  # cancels prior buy + enqueues sell

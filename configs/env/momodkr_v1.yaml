@@ -1,3 +1,6 @@
+apply_obs_normalisation: true   # z-score market features using train-only norm_stats.json baked alongside each episode
+position_feature_clip: 3.0       # hard clip on the 4 position features so leveraged unrealized swings don't blow up the MLP input
+
 env:
   symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
   obs:

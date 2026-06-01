@@ -24,6 +24,14 @@ def _instant_sim_cfg() -> SimulatorConfig:
     )
 
 
+def _instant_env_cfg(episode_length_ticks: int = 500) -> EnvConfig:
+    return EnvConfig(
+        episode_length_ticks=episode_length_ticks,
+        sim=_instant_sim_cfg(),
+        apply_obs_normalisation=False,
+    )
+
+
 def _synthetic_episode(n_rows: int = 12_000, drift_bps_per_tick: float = 0.0, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     ts = 1_700_000_000_000 + np.arange(n_rows, dtype=np.int64) * 100
@@ -52,7 +60,7 @@ def episode_parquet(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def cfg_short_episodes() -> EnvConfig:
-    return EnvConfig(episode_length_ticks=500, sim=_instant_sim_cfg())
+    return _instant_env_cfg(500)
 
 
 def test_env_obs_and_action_space(episode_parquet: Path, cfg_short_episodes: EnvConfig) -> None:
@@ -142,7 +150,7 @@ def test_missing_columns_raise_on_load(tmp_path: Path) -> None:
     p = tmp_path / "bad.parquet"
     df.to_parquet(p, index=False)
     with pytest.raises(KeyError):
-        MomoDkrEnv(p, EnvConfig(episode_length_ticks=500))
+        MomoDkrEnv(p, _instant_env_cfg(500))
 
 
 def test_dataset_too_small_raises(tmp_path: Path) -> None:
@@ -150,7 +158,7 @@ def test_dataset_too_small_raises(tmp_path: Path) -> None:
     p = tmp_path / "small.parquet"
     df.to_parquet(p, index=False)
     with pytest.raises(ValueError, match="rows"):
-        MomoDkrEnv(p, EnvConfig(episode_length_ticks=500))
+        MomoDkrEnv(p, _instant_env_cfg(500))
 
 
 def test_episode_parquet_has_all_sim_state_columns(episode_parquet: Path) -> None:

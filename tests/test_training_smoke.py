@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from data.preprocessors.feature_stats import compute_norm_stats, save_norm_stats
 from serving.feature_version import MARKET_FEATURE_NAMES
 from training.train_ppo import train
 
@@ -44,7 +45,11 @@ def _synthetic_trending(n: int = 8_000, drift_bps_per_tick: float = 0.5, seed: i
 @pytest.mark.slow
 def test_train_ppo_end_to_end_writes_best_checkpoint(tmp_path: Path) -> None:
     parquet_path = tmp_path / "train.parquet"
-    _synthetic_trending().to_parquet(parquet_path, index=False)
+    df = _synthetic_trending()
+    df.to_parquet(parquet_path, index=False)
+    # Materialise norm_stats.json next to the parquet so the env's
+    # apply_obs_normalisation pipeline has training stats to apply.
+    save_norm_stats(compute_norm_stats(df), tmp_path / "norm_stats.json")
 
     train_cfg = {
         "run_name": "smoke",

@@ -1,0 +1,43 @@
+# Walk-forward smoke training config -- ~30 min on a CPU pod.
+# Use this BEFORE the 20M-step full-history run to validate that the
+# current reward shaping + hyperparameters survive a 1-month holdout.
+run_name: v1-walkforward
+seed: [42]
+
+policy: MlpPolicy
+total_timesteps: 1_500_000        # ~1/13 of the cold-start budget
+n_steps: 2048
+batch_size: 512
+n_epochs: 4
+gamma: 0.995
+gae_lambda: 0.95
+clip_range: 0.2
+vf_coef: 0.5
+max_grad_norm: 0.5
+learning_rate: {schedule: linear, start: 0.0003, end: 0.0001}
+ent_coef: {schedule: linear, start: 0.005, end: 0.001}
+policy_kwargs:
+  net_arch:
+    pi: [256, 256, 128]
+    vf: [256, 256, 128]
+  activation_fn: tanh
+  ortho_init: true
+
+vec_env:
+  type: subproc
+  n_envs: 8
+
+eval:
+  n_eval_episodes: 4
+  eval_freq: 50_000
+
+callbacks:
+  sigma_divergence_killswitch:
+    high_threshold: 0.95
+    low_threshold: 0.05
+    consecutive_evals: 2
+  trade_log:
+    n_eval_episodes: 4
+    record_obs: true                # required for downstream ONNX parity gate
+  best_checkpoint_tracker:
+    metric: eval/mean_reward

@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from data.preprocessors.feature_stats import compute_norm_stats, save_norm_stats
 from scripts.export_onnx import export
 from scripts.validate_onnx_parity import (
     load_obs_from_eval_log_dir,
@@ -44,7 +45,10 @@ def _synthetic_episode(n: int = 5_000, drift_bps_per_tick: float = 0.5, seed: in
 @pytest.fixture
 def trained_run(tmp_path: Path) -> dict[str, Path]:
     parquet = tmp_path / "train.parquet"
-    _synthetic_episode().to_parquet(parquet, index=False)
+    df = _synthetic_episode()
+    df.to_parquet(parquet, index=False)
+    norm_stats_path = tmp_path / "norm_stats.json"
+    save_norm_stats(compute_norm_stats(df), norm_stats_path)
 
     train_cfg = {
         "seed": [0],
@@ -101,7 +105,7 @@ def trained_run(tmp_path: Path) -> dict[str, Path]:
     env_yaml.write_text(yaml.safe_dump(env_cfg))
     run_dir = tmp_path / "run"
     train(train_yaml, env_yaml, parquet, parquet, run_dir)
-    return {"run_dir": run_dir, "parquet": parquet}
+    return {"run_dir": run_dir, "parquet": parquet, "norm_stats": norm_stats_path}
 
 
 @pytest.mark.slow
@@ -109,22 +113,24 @@ def test_export_onnx_writes_graph_and_manifest(trained_run: dict[str, Path], tmp
     best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
     assert best.exists()
     onnx_path = tmp_path / "policy.onnx"
-    export(best, onnx_path)
+    export(best, onnx_path, norm_stats_path=trained_run["norm_stats"])
     assert onnx_path.exists()
     manifest = json.loads(onnx_path.with_suffix(".json").read_text())
     assert manifest["obs_dim"] == OBS_DIM
     assert manifest["n_actions"] == 5
     assert manifest["feature_version"]
     assert manifest["feature_spec_checksum"]
+    assert manifest["normalisation_baked_in"] is True
+    assert manifest["norm_stats_path"] == str(trained_run["norm_stats"])
 
 
 @pytest.mark.slow
 def test_onnx_parity_passes_on_eval_log_obs(trained_run: dict[str, Path], tmp_path: Path) -> None:
     best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
     onnx_path = tmp_path / "policy.onnx"
-    export(best, onnx_path)
+    export(best, onnx_path, norm_stats_path=trained_run["norm_stats"])
     obs = load_obs_from_eval_log_dir(trained_run["run_dir"] / "eval_episodes")
-    result = validate(best, onnx_path, obs)
+    result = validate(best, onnx_path, obs, norm_stats_path=trained_run["norm_stats"])
     assert result["passed"], result
     assert result["max_diff_logits"] < 1e-4
     assert result["action_match"]
@@ -134,9 +140,9 @@ def test_onnx_parity_passes_on_eval_log_obs(trained_run: dict[str, Path], tmp_pa
 def test_onnx_parity_passes_on_parquet_obs(trained_run: dict[str, Path], tmp_path: Path) -> None:
     best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
     onnx_path = tmp_path / "policy.onnx"
-    export(best, onnx_path)
+    export(best, onnx_path, norm_stats_path=trained_run["norm_stats"])
     obs = load_obs_from_parquet(trained_run["parquet"], max_rows=200)
-    result = validate(best, onnx_path, obs)
+    result = validate(best, onnx_path, obs, norm_stats_path=trained_run["norm_stats"])
     assert result["passed"], result
 
 
@@ -147,10 +153,8 @@ def test_onnx_parity_detects_mismatch(trained_run: dict[str, Path], tmp_path: Pa
 
     best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
     onnx_path = tmp_path / "policy.onnx"
-    export(best, onnx_path)
+    export(best, onnx_path, norm_stats_path=trained_run["norm_stats"])
 
-    # Re-export with a different model: build a fresh PPO with random weights
-    # by perturbing the loaded model in-place, then re-export.
     from stable_baselines3 import PPO
 
     perturbed = PPO.load(best, device="cpu")
@@ -160,10 +164,8 @@ def test_onnx_parity_detects_mismatch(trained_run: dict[str, Path], tmp_path: Pa
     bad_path = tmp_path / "bad.zip"
     perturbed.save(bad_path)
     bad_onnx = tmp_path / "bad.onnx"
-    export(bad_path, bad_onnx)
+    export(bad_path, bad_onnx, norm_stats_path=trained_run["norm_stats"])
 
     obs = load_obs_from_parquet(trained_run["parquet"], max_rows=100)
-    # The original ONNX should still match the original checkpoint, but it
-    # MUST NOT match the perturbed checkpoint.
-    bad_result = validate(bad_path, onnx_path, obs)
+    bad_result = validate(bad_path, onnx_path, obs, norm_stats_path=trained_run["norm_stats"])
     assert not bad_result["passed"], "parity should have detected a model mismatch"

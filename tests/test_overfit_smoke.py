@@ -34,7 +34,7 @@ def _instant_cfg(episode_length_ticks: int) -> EnvConfig:
         tick_size_by_symbol={},
         default_tick_size=0.0,
     )
-    return EnvConfig(episode_length_ticks=episode_length_ticks, sim=sim)
+    return EnvConfig(episode_length_ticks=episode_length_ticks, sim=sim, apply_obs_normalisation=False)
 
 
 def _trending_episode(n: int = 20_000, drift_bps_per_tick: float = 1.0, seed: int = 0) -> pd.DataFrame:

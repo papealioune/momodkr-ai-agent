@@ -30,7 +30,9 @@ import pandas as pd
 import torch
 from stable_baselines3 import PPO
 
-from serving.feature_version import MARKET_FEATURE_NAMES, OBS_DIM
+from data.preprocessors.feature_stats import load_norm_stats
+from scripts.export_onnx import NormalizeMarketBlock
+from serving.feature_version import MARKET_FEATURE_DIM, MARKET_FEATURE_NAMES, OBS_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +77,11 @@ def load_obs_from_eval_log_dir(eval_dir: Path, max_rows: int = 1000) -> np.ndarr
     return arr
 
 
-def torch_logits(model: PPO, obs: np.ndarray) -> np.ndarray:
+def torch_logits(model: PPO, obs: np.ndarray, normalise: NormalizeMarketBlock | None = None) -> np.ndarray:
     with torch.no_grad():
         obs_t = torch.from_numpy(obs).to(model.device)
+        if normalise is not None:
+            obs_t = normalise(obs_t)
         features = model.policy.features_extractor(obs_t)
         latent_pi, _ = model.policy.mlp_extractor(features)
         logits = model.policy.action_net(latent_pi)
@@ -94,11 +98,22 @@ def validate(
     onnx_path: Path,
     obs: np.ndarray,
     tol_logits: float = DEFAULT_TOL,
+    norm_stats_path: Path | None = None,
 ) -> dict:
     model = PPO.load(checkpoint_path, device="cpu")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
-    pt_logits = torch_logits(model, obs)
+    normalise: NormalizeMarketBlock | None = None
+    if norm_stats_path is not None and norm_stats_path.exists():
+        stats = load_norm_stats(norm_stats_path)
+        normalise = NormalizeMarketBlock(
+            mean=torch.from_numpy(stats.mean_array),
+            std=torch.from_numpy(stats.std_array),
+            clip=stats.clip,
+            market_dim=MARKET_FEATURE_DIM,
+        ).eval()
+
+    pt_logits = torch_logits(model, obs, normalise=normalise)
     ox_logits, ox_action = onnx_logits(session, obs)
     if pt_logits.shape != ox_logits.shape:
         raise ValueError(f"logits shape mismatch: torch={pt_logits.shape} onnx={ox_logits.shape}")
@@ -136,6 +151,12 @@ def main() -> None:
     src.add_argument("--eval-log-dir")
     src.add_argument("--random-batch", type=int, default=0)
     p.add_argument("--max-rows", type=int, default=1000)
+    p.add_argument(
+        "--norm-stats",
+        default=None,
+        help="path to norm_stats.json; required if the ONNX has baked normalisation (the "
+             "default) so the PyTorch reference applies the same z-score before policy forward",
+    )
     args = p.parse_args()
 
     if args.obs_parquet:
@@ -147,7 +168,13 @@ def main() -> None:
         obs = rng.standard_normal((args.random_batch, OBS_DIM)).astype(np.float32)
         logger.warning("using random batch -- NOT a production gate")
 
-    result = validate(Path(args.checkpoint), Path(args.onnx), obs, tol_logits=args.tol)
+    result = validate(
+        Path(args.checkpoint),
+        Path(args.onnx),
+        obs,
+        tol_logits=args.tol,
+        norm_stats_path=Path(args.norm_stats) if args.norm_stats else None,
+    )
     print(json.dumps(result, indent=2))
     raise SystemExit(0 if result["passed"] else 1)
 
