@@ -50,11 +50,13 @@ if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ]; then
     echo "  Add them in RunPod: Pod > Edit > Environment Variables."
     exit 1
 fi
+# Use list_objects_v2(MaxKeys=1) -- works for bucket-scoped R2 tokens that
+# don't have HeadBucket permission (Path B tokens scoped to momodkr-data only).
 python -c "
 from scripts.r2_sync import get_client, get_bucket
 c = get_client(); b = get_bucket()
-c.head_bucket(Bucket=b)
-print(f'  R2 reachable, bucket=\"{b}\"')
+r = c.list_objects_v2(Bucket=b, MaxKeys=1)
+print(f'  R2 reachable, bucket=\"{b}\" ({r.get(\"KeyCount\", 0)} top-level key visible)')
 "
 
 # 3. Smoke test the code

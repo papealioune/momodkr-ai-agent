@@ -1,14 +1,18 @@
 """Cloudflare R2 sync for MomoDkr (boto3, S3-compatible).
 
-Shares moleapp's bucket under the `momodkr/` prefix per the project
-decision (see docs/PROJECT_R2_DATASET.md note in memory). Uses the same
-env-var auth pattern as moleapp's `scripts/r2_sync.py`:
+Dedicated `momodkr-data` bucket (Path B per 2026-06-01 decision):
+MomoDkr owns its own R2 bucket end-to-end. Permissions are isolated from
+moleapp's bucket, so a leaked / over-scoped token can't clobber moleapp
+data and vice versa. The bucket root holds the data directly (no
+`momodkr/` prefix; the whole bucket is ours).
+
+Env vars (set in RunPod Pod Settings -> Environment Variables):
 
     R2_ACCESS_KEY_ID
     R2_SECRET_ACCESS_KEY
-    R2_ENDPOINT_URL       (default: moleapp's account endpoint)
-    R2_BUCKET_NAME        (default: moleapp-rl-data)
-    MOMODKR_R2_PREFIX     (default: momodkr/)
+    R2_ENDPOINT_URL       (default: moleapp's account endpoint -- same Cloudflare account)
+    R2_BUCKET_NAME        (default: momodkr-data)
+    MOMODKR_R2_PREFIX     (default: "" -- empty; the whole bucket is the project's namespace)
 
 Usage:
     # upload local dataset tree to R2
@@ -20,7 +24,8 @@ Usage:
     # list a prefix
     python -m scripts.r2_sync list --filter BTCUSDT/
 
-    # pull moleapp funding parquet for one asset (uses moleapp's prefix, NOT momodkr/)
+    # cross-bucket: pull moleapp's funding parquet for one asset (requires DIFFERENT creds
+    # via R2_MOLEAPP_ACCESS_KEY_ID / R2_MOLEAPP_SECRET_ACCESS_KEY env vars)
     python -m scripts.r2_sync pull-moleapp-funding --asset BTC --local data/datasets/BTCUSDT/fundingRate
 """
 
@@ -41,8 +46,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 DEFAULT_ENDPOINT = "https://9507330fe5a8c228ea49f6e5c6c6b659.r2.cloudflarestorage.com"
-DEFAULT_BUCKET = "moleapp-rl-data"
-DEFAULT_MOMODKR_PREFIX = "momodkr/"
+DEFAULT_BUCKET = "momodkr-data"
+DEFAULT_MOMODKR_PREFIX = ""
+DEFAULT_MOLEAPP_BUCKET = "moleapp-rl-data"
 DEFAULT_MOLEAPP_PROCESSED_PREFIX = "processed/1h/"
 
 
@@ -71,6 +77,8 @@ def get_bucket() -> str:
 
 def get_prefix() -> str:
     p = os.getenv("MOMODKR_R2_PREFIX", DEFAULT_MOMODKR_PREFIX)
+    if not p:
+        return ""
     return p if p.endswith("/") else p + "/"
 
 
@@ -188,13 +196,40 @@ def list_keys(bucket: str | None = None, prefix: str | None = None, filter_subst
     return out
 
 
+def _get_moleapp_client():
+    """Separate boto3 client for cross-bucket reads from moleapp's bucket.
+
+    Uses R2_MOLEAPP_ACCESS_KEY_ID / R2_MOLEAPP_SECRET_ACCESS_KEY if set,
+    otherwise falls back to the main R2_* creds (only useful if the main
+    token has access to BOTH buckets, which we avoid in Path B).
+    """
+    endpoint = os.getenv("R2_ENDPOINT_URL", DEFAULT_ENDPOINT)
+    access_key = os.getenv("R2_MOLEAPP_ACCESS_KEY_ID") or os.getenv("R2_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("R2_MOLEAPP_SECRET_ACCESS_KEY") or os.getenv("R2_SECRET_ACCESS_KEY", "")
+    if not (access_key and secret_key):
+        raise SystemExit(
+            "pull-moleapp-funding needs R2_MOLEAPP_ACCESS_KEY_ID + R2_MOLEAPP_SECRET_ACCESS_KEY "
+            "(token scoped to the moleapp-rl-data bucket)."
+        )
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "adaptive"}),
+        region_name="auto",
+    )
+
+
 def pull_moleapp_funding(asset: str, local_dir: Path, bucket: str | None = None) -> list[Path]:
     """Pull funding parquet(s) for an asset from moleapp's processed/1h prefix.
 
-    Funding files in moleapp are stored as `{ASSET}_funding_{N}d.parquet`.
+    Requires moleapp-scoped credentials (see _get_moleapp_client). This is
+    an OPT-IN convenience; the default ingest path fetches fresh funding
+    from Binance Vision monthly archives instead.
     """
-    client = get_client()
-    bucket = bucket or get_bucket()
+    client = _get_moleapp_client()
+    bucket = bucket or DEFAULT_MOLEAPP_BUCKET
     prefix = DEFAULT_MOLEAPP_PROCESSED_PREFIX
 
     paginator = client.get_paginator("list_objects_v2")

@@ -168,7 +168,13 @@ def main() -> None:
     p.add_argument("--overwrite-snapshots", action="store_true")
     p.add_argument("--streams", nargs="+", default=list(STREAMS))
     p.add_argument("--no-upload", action="store_true", help="run download/parse/reconstruct only; skip R2 sync")
-    p.add_argument("--skip-funding", action="store_true")
+    p.add_argument(
+        "--pull-moleapp-funding",
+        action="store_true",
+        help="opt-in: cross-bucket pull funding parquets from moleapp's R2 bucket "
+             "(needs R2_MOLEAPP_ACCESS_KEY_ID + R2_MOLEAPP_SECRET_ACCESS_KEY). "
+             "Default: skip; funding will be fetched from Binance Vision monthly archives.",
+    )
     p.add_argument("--upload-only", action="store_true", help="skip download/parse/reconstruct; only sync local to R2")
     args = p.parse_args()
 
@@ -186,7 +192,7 @@ def main() -> None:
         logger.info("upload-only complete in %.1fs", time.time() - t0)
         return
 
-    _ensure_funding(args.symbols, ds_root, args.skip_funding)
+    _ensure_funding(args.symbols, ds_root, skip=not args.pull_moleapp_funding)
 
     tasks = build_tasks(args.symbols, start, end, streams=args.streams)
     logger.info("planned %d download tasks", len(tasks))

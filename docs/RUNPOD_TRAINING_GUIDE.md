@@ -4,7 +4,7 @@ End-to-end recipe for training MomoDkr's PPO policy on the prepared
 2-year dataset, exporting a deployment-ready ONNX with normalisation
 baked in, and gating it through the moleapp parity rule. Assumes
 [Data Prep](RUNPOD_DATA_PREP_GUIDE.md) is complete and episodes live at
-`s3://moleapp-rl-data/momodkr/episodes/<SYM>/0.1.0/`.
+`s3://momodkr-data/episodes/<SYM>/0.1.0/` (in the dedicated MomoDkr bucket).
 
 ## 1. Pod — reuse the data-prep pod by default
 
@@ -287,10 +287,10 @@ python -m scripts.r2_sync upload --local runs/v1-engine-cold-btc --filter eval_e
 The final shippable artifacts live at:
 
 ```
-s3://moleapp-rl-data/momodkr/<run-dir>/policy.onnx           # symbol-agnostic graph
-s3://moleapp-rl-data/momodkr/<run-dir>/policy.json           # manifest the Rust engine asserts at startup
-s3://moleapp-rl-data/momodkr/<run-dir>/policy.bundle.json    # per-symbol normalisation stats
-s3://moleapp-rl-data/momodkr/<run-dir>/best_checkpoint/best_checkpoint.zip   # for re-export / debugging
+s3://momodkr-data/<run-dir>/policy.onnx           # symbol-agnostic graph
+s3://momodkr-data/<run-dir>/policy.json           # manifest the Rust engine asserts at startup
+s3://momodkr-data/<run-dir>/policy.bundle.json    # per-symbol normalisation stats
+s3://momodkr-data/<run-dir>/best_checkpoint/best_checkpoint.zip   # for re-export / debugging
 ```
 
 The Rust feature_builder loads `policy.bundle.json` into a

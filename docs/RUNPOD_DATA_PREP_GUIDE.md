@@ -42,7 +42,12 @@ R2_SECRET_ACCESS_KEY=<moleapp R2 secret key>
 ```
 
 Optional overrides (defaults in [`.env.example`](../.env.example)):
-`R2_ENDPOINT_URL`, `R2_BUCKET_NAME=moleapp-rl-data`, `MOMODKR_R2_PREFIX=momodkr/`.
+`R2_ENDPOINT_URL`, `R2_BUCKET_NAME=momodkr-data`, `MOMODKR_R2_PREFIX=` (empty).
+
+> **R2 token scope:** the token must have **Object Read & Write** on the
+> `momodkr-data` bucket. In Cloudflare's R2 token creation UI: choose
+> "Specify bucket(s) → `momodkr-data`" and "Permissions → Object Read &
+> Write". Account-wide tokens work too but aren't necessary.
 
 ## 2. Clone the repo + bootstrap
 
@@ -118,7 +123,7 @@ Safe to kill and restart if your network blips.
 `prepare_l2_dataset complete in <T>s`. R2 holds:
 
 ```
-s3://moleapp-rl-data/momodkr/<SYM>/
+s3://momodkr-data/<SYM>/
   bookTicker/<YYYY-MM-DD>.parquet × 730
   aggTrades/<YYYY-MM-DD>.parquet × 730
   bookDepth/<YYYY-MM-DD>.parquet × 730
