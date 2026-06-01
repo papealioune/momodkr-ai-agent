@@ -169,3 +169,97 @@ def test_onnx_parity_detects_mismatch(trained_run: dict[str, Path], tmp_path: Pa
     obs = load_obs_from_parquet(trained_run["parquet"], max_rows=100)
     bad_result = validate(bad_path, onnx_path, obs, norm_stats_path=trained_run["norm_stats"])
     assert not bad_result["passed"], "parity should have detected a model mismatch"
+
+
+# ---------------- production multi-symbol bundle mode ----------------
+
+@pytest.mark.slow
+def test_onnx_export_bundle_mode_strips_normalisation_and_emits_sidecar(
+    trained_run: dict[str, Path], tmp_path: Path
+) -> None:
+    """Production export mode: ONNX is symbol-agnostic + bundle sidecar carries per-symbol stats."""
+    from data.preprocessors.feature_stats import compute_norm_stats, save_norm_stats
+    from serving.feature_version import FEATURE_VERSION
+    from serving.norm_bundle import NormStatsBundle
+
+    # Materialise per-symbol norm_stats in episode-layout dirs so the bundle's auto-discovery works.
+    episodes_root = tmp_path / "episodes"
+    base_df = pd.read_parquet(trained_run["parquet"])
+    for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        ep_dir = episodes_root / sym / FEATURE_VERSION
+        ep_dir.mkdir(parents=True)
+        # Slight per-symbol perturbation so stats differ
+        df = base_df.copy()
+        for c in MARKET_FEATURE_NAMES:
+            df[c] = df[c] + np.random.default_rng(hash(sym) % 1000).standard_normal(len(df)).astype(np.float32) * 0.01
+        save_norm_stats(compute_norm_stats(df), ep_dir / "norm_stats.json")
+
+    best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
+    onnx_path = tmp_path / "policy.onnx"
+    bundle = NormStatsBundle.from_episode_dirs(episodes_root, ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    export(best, onnx_path, bundle=bundle)
+
+    # Manifest declares normalisation NOT baked, bundle path + symbols listed.
+    manifest = json.loads(onnx_path.with_suffix(".json").read_text())
+    assert manifest["normalisation_baked_in"] is False
+    assert manifest["bundle_path"] is not None
+    assert manifest["bundle_symbols"] == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    # Sidecar bundle next to the ONNX
+    bundle_sidecar = onnx_path.with_name(onnx_path.stem + ".bundle.json")
+    assert bundle_sidecar.exists()
+
+
+@pytest.mark.slow
+def test_onnx_parity_passes_per_symbol_with_bundle(trained_run: dict[str, Path], tmp_path: Path) -> None:
+    """Same ONNX + same obs but different per-symbol stats -> parity holds for each symbol independently."""
+    from data.preprocessors.feature_stats import compute_norm_stats, save_norm_stats
+    from serving.feature_version import FEATURE_VERSION
+    from serving.norm_bundle import NormStatsBundle
+
+    episodes_root = tmp_path / "episodes"
+    base_df = pd.read_parquet(trained_run["parquet"])
+    for sym in ("BTCUSDT", "ETHUSDT"):
+        ep_dir = episodes_root / sym / FEATURE_VERSION
+        ep_dir.mkdir(parents=True)
+        df = base_df.copy()
+        # Different scale per symbol so the stats are genuinely different
+        scale = 1.0 if sym == "BTCUSDT" else 100.0
+        for c in MARKET_FEATURE_NAMES:
+            df[c] = (df[c] * scale).astype(np.float32)
+        save_norm_stats(compute_norm_stats(df), ep_dir / "norm_stats.json")
+
+    best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
+    onnx_path = tmp_path / "policy.onnx"
+    bundle = NormStatsBundle.from_episode_dirs(episodes_root, ["BTCUSDT", "ETHUSDT"])
+    export(best, onnx_path, bundle=bundle)
+
+    obs = load_obs_from_parquet(trained_run["parquet"], max_rows=100)
+
+    # Parity must hold INDEPENDENTLY for each symbol via its slice of the bundle.
+    result_btc = validate(best, onnx_path, obs, bundle=bundle, bundle_symbol="BTCUSDT")
+    assert result_btc["passed"], result_btc
+    assert result_btc["max_diff_logits"] < 1e-4
+
+    result_eth = validate(best, onnx_path, obs, bundle=bundle, bundle_symbol="ETHUSDT")
+    assert result_eth["passed"], result_eth
+    assert result_eth["max_diff_logits"] < 1e-4
+
+
+@pytest.mark.slow
+def test_export_rejects_both_bake_and_bundle(trained_run: dict[str, Path], tmp_path: Path) -> None:
+    """The two normalisation modes are mutually exclusive at the export API."""
+    from serving.feature_version import FEATURE_VERSION
+    from serving.norm_bundle import NormStatsBundle
+
+    episodes_root = tmp_path / "episodes"
+    ep_dir = episodes_root / "BTCUSDT" / FEATURE_VERSION
+    ep_dir.mkdir(parents=True)
+    # Reuse the trained_run's stats for the synthetic episode dir
+    import shutil
+
+    shutil.copyfile(trained_run["norm_stats"], ep_dir / "norm_stats.json")
+    bundle = NormStatsBundle.from_episode_dirs(episodes_root, ["BTCUSDT"])
+
+    best = trained_run["run_dir"] / "best_checkpoint" / "best_model.zip"
+    with pytest.raises(ValueError, match="either bundle"):
+        export(best, tmp_path / "x.onnx", norm_stats_path=trained_run["norm_stats"], bundle=bundle)

@@ -30,9 +30,10 @@ import pandas as pd
 import torch
 from stable_baselines3 import PPO
 
-from data.preprocessors.feature_stats import load_norm_stats
+from data.preprocessors.feature_stats import apply_zscore, load_norm_stats
 from scripts.export_onnx import NormalizeMarketBlock
 from serving.feature_version import MARKET_FEATURE_DIM, MARKET_FEATURE_NAMES, OBS_DIM
+from serving.norm_bundle import NormStatsBundle
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,20 @@ def validate(
     obs: np.ndarray,
     tol_logits: float = DEFAULT_TOL,
     norm_stats_path: Path | None = None,
+    bundle: NormStatsBundle | None = None,
+    bundle_symbol: str | None = None,
 ) -> dict:
+    """Compare PyTorch reference vs ONNX inference on the same obs.
+
+    Three normalisation modes (must match how the ONNX was exported):
+      - baked ONNX (ONNX normalises internally): pass norm_stats_path so
+        the PyTorch side applies the same NormalizeMarketBlock.
+      - bundle ONNX (production, normalisation NOT in graph): pre-normalise
+        `obs` externally using bundle.apply(symbol) on the MARKET portion
+        BEFORE calling validate; OR pass bundle= + bundle_symbol= and we'll
+        apply it for both sides here.
+      - bare ONNX with no normalisation anywhere: pass neither.
+    """
     model = PPO.load(checkpoint_path, device="cpu")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
@@ -113,8 +127,18 @@ def validate(
             market_dim=MARKET_FEATURE_DIM,
         ).eval()
 
-    pt_logits = torch_logits(model, obs, normalise=normalise)
-    ox_logits, ox_action = onnx_logits(session, obs)
+    obs_for_inference = obs
+    if bundle is not None:
+        if not bundle_symbol:
+            raise ValueError("bundle= requires bundle_symbol= to know which per-symbol stats to apply")
+        sym_stats = bundle.get_norm_stats(bundle_symbol)
+        market = obs[:, :MARKET_FEATURE_DIM]
+        pos = obs[:, MARKET_FEATURE_DIM:]
+        market_norm = apply_zscore(market, sym_stats)
+        obs_for_inference = np.concatenate([market_norm, pos], axis=1).astype(np.float32)
+
+    pt_logits = torch_logits(model, obs_for_inference, normalise=normalise)
+    ox_logits, ox_action = onnx_logits(session, obs_for_inference)
     if pt_logits.shape != ox_logits.shape:
         raise ValueError(f"logits shape mismatch: torch={pt_logits.shape} onnx={ox_logits.shape}")
 
@@ -154,10 +178,21 @@ def main() -> None:
     p.add_argument(
         "--norm-stats",
         default=None,
-        help="path to norm_stats.json; required if the ONNX has baked normalisation (the "
-             "default) so the PyTorch reference applies the same z-score before policy forward",
+        help="single-symbol baked mode: path to the norm_stats.json that was baked into the ONNX",
+    )
+    p.add_argument(
+        "--bundle",
+        default=None,
+        help="production multi-symbol mode: path to <output>.bundle.json shipped with the ONNX",
+    )
+    p.add_argument(
+        "--bundle-symbol",
+        default=None,
+        help="which symbol from the bundle to use for this parity probe (required with --bundle)",
     )
     args = p.parse_args()
+    if args.norm_stats and args.bundle:
+        raise SystemExit("--norm-stats and --bundle are mutually exclusive (the ONNX was exported with one or the other)")
 
     if args.obs_parquet:
         obs = load_obs_from_parquet(Path(args.obs_parquet), max_rows=args.max_rows)
@@ -168,12 +203,17 @@ def main() -> None:
         obs = rng.standard_normal((args.random_batch, OBS_DIM)).astype(np.float32)
         logger.warning("using random batch -- NOT a production gate")
 
+    bundle = NormStatsBundle.load(Path(args.bundle)) if args.bundle else None
+    if bundle is not None and not args.bundle_symbol:
+        raise SystemExit("--bundle requires --bundle-symbol (one of the symbols in the bundle)")
     result = validate(
         Path(args.checkpoint),
         Path(args.onnx),
         obs,
         tol_logits=args.tol,
         norm_stats_path=Path(args.norm_stats) if args.norm_stats else None,
+        bundle=bundle,
+        bundle_symbol=args.bundle_symbol,
     )
     print(json.dumps(result, indent=2))
     raise SystemExit(0 if result["passed"] else 1)

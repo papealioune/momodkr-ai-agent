@@ -181,74 +181,106 @@ python -m scripts.r2_sync upload \
 moleapp rule 3.7: the next eval that beats this one will overwrite
 `best_checkpoint/` locally. The dated copy + R2 backup is your insurance.
 
-## 7. ONNX export with normalisation baked in (~30 sec)
+## 7. ONNX export — production multi-symbol mode (~30 sec)
+
+The vault serves multiple symbols (BTC/ETH/SOL) with **one ONNX brain**.
+Per-symbol z-score stats ship separately as a bundle sidecar so the
+Rust live engine can normalise per-symbol BEFORE each inference call.
+Adding a 4th symbol post-launch becomes a zero-retraining operation —
+just append its `norm_stats.json` to the bundle and redeploy.
 
 ```bash
 python -m scripts.export_onnx \
     --checkpoint runs/v1-engine-cold-btc/best_checkpoint/best_checkpoint.zip \
-    --norm-stats data/episodes/BTCUSDT/0.1.0/norm_stats.json \
-    --output runs/v1-engine-cold-btc/policy.onnx
+    --output runs/v1-engine-cold-btc/policy.onnx \
+    --episodes-root data/episodes \
+    --symbols BTCUSDT ETHUSDT SOLUSDT
 ```
 
-Inspect the sidecar manifest:
+Three artifacts land next to each other:
+
+```
+runs/v1-engine-cold-btc/
+  policy.onnx              symbol-agnostic graph (no normalisation embedded)
+  policy.json              manifest -- feature_version, checksum, bundle_path, bundle_symbols
+  policy.bundle.json       per-symbol mean/std/n_train_rows for the Rust feature_builder
+```
+
+Verify the manifest:
 
 ```bash
-cat runs/v1-engine-cold-btc/policy.onnx.json
+python -c "
+import json
+m = json.load(open('runs/v1-engine-cold-btc/policy.json'))
+assert m['normalisation_baked_in'] is False, m
+assert m['bundle_symbols'] == ['BTCUSDT','ETHUSDT','SOLUSDT'], m
+print('OK: ONNX is symbol-agnostic; bundle covers', m['bundle_symbols'])
+"
 ```
 
-Confirm `normalisation_baked_in: true` and `norm_stats_path` matches the
-path you passed. The Rust live engine will send RAW features; the ONNX
-graph does the z-score internally.
+> **Single-symbol pilot only?** Use `--norm-stats <path>` instead of
+> `--symbols ...` to bake one symbol's stats into the ONNX graph. Simpler
+> artifact but locks the ONNX to one venue/symbol. Not recommended for
+> the production vault.
 
 ## 8. ONNX parity gate — DO NOT SKIP
 
 moleapp lesson 3.4: silent ONNX export bugs ship to mainnet undetected.
-Two parity runs to cover both obs sources:
+Run parity for **every symbol in the bundle**:
 
 ```bash
-# (a) against the eval parquet -- pure-market obs
-python -m scripts.validate_onnx_parity \
-    --checkpoint runs/v1-engine-cold-btc/best_checkpoint/best_checkpoint.zip \
-    --onnx       runs/v1-engine-cold-btc/policy.onnx \
-    --norm-stats data/episodes/BTCUSDT/0.1.0/norm_stats.json \
-    --obs-parquet data/episodes/BTCUSDT/0.1.0/eval.parquet \
-    --max-rows 1000 \
-    --tol 1e-4
+for SYM in BTCUSDT ETHUSDT SOLUSDT; do
+  echo "=== parity for $SYM ==="
+  # (a) against that symbol's eval parquet -- pure-market obs
+  python -m scripts.validate_onnx_parity \
+      --checkpoint runs/v1-engine-cold-btc/best_checkpoint/best_checkpoint.zip \
+      --onnx       runs/v1-engine-cold-btc/policy.onnx \
+      --bundle     runs/v1-engine-cold-btc/policy.bundle.json \
+      --bundle-symbol "$SYM" \
+      --obs-parquet  "data/episodes/$SYM/0.1.0/eval.parquet" \
+      --max-rows 1000 \
+      --tol 1e-4
 
-# (b) against the recorded eval episode JSONs -- includes live position features
-python -m scripts.validate_onnx_parity \
-    --checkpoint runs/v1-engine-cold-btc/best_checkpoint/best_checkpoint.zip \
-    --onnx       runs/v1-engine-cold-btc/policy.onnx \
-    --norm-stats data/episodes/BTCUSDT/0.1.0/norm_stats.json \
-    --eval-log-dir runs/v1-engine-cold-btc/eval_episodes \
-    --max-rows 1000 \
-    --tol 1e-4
+  # (b) against the recorded eval episode JSONs (live position features included)
+  python -m scripts.validate_onnx_parity \
+      --checkpoint runs/v1-engine-cold-btc/best_checkpoint/best_checkpoint.zip \
+      --onnx       runs/v1-engine-cold-btc/policy.onnx \
+      --bundle     runs/v1-engine-cold-btc/policy.bundle.json \
+      --bundle-symbol "$SYM" \
+      --eval-log-dir runs/v1-engine-cold-btc/eval_episodes \
+      --max-rows 1000 \
+      --tol 1e-4
+done
 ```
 
-Both must print `passed: true` with `max_diff_logits < 1e-4` and
-`action_match: true`. If either fails, **DO NOT DEPLOY** — investigate
-before re-exporting.
+Every run must print `passed: true` with `max_diff_logits < 1e-4` and
+`action_match: true`. If any symbol fails, **DO NOT DEPLOY** — re-check
+that the bundle's stats came from the same training data the policy saw.
 
 ## 9. Upload deployable artifacts to R2
 
 ```bash
-python -m scripts.r2_sync upload \
-    --local runs/v1-engine-cold-btc \
-    --filter policy.onnx
+# Three artifacts the Rust live engine needs: the graph, its manifest, and the bundle.
+python -m scripts.r2_sync upload --local runs/v1-engine-cold-btc --filter policy.onnx
+python -m scripts.r2_sync upload --local runs/v1-engine-cold-btc --filter policy.json
+python -m scripts.r2_sync upload --local runs/v1-engine-cold-btc --filter policy.bundle.json
 
 # Optionally pull the full run for offline review
-python -m scripts.r2_sync upload \
-    --local runs/v1-engine-cold-btc \
-    --filter eval_episodes
+python -m scripts.r2_sync upload --local runs/v1-engine-cold-btc --filter eval_episodes
 ```
 
-The final shippable artifact lives at:
+The final shippable artifacts live at:
 
 ```
-s3://moleapp-rl-data/momodkr/<run-dir>/policy.onnx
-s3://moleapp-rl-data/momodkr/<run-dir>/policy.onnx.json   # manifest the Rust engine asserts at startup
+s3://moleapp-rl-data/momodkr/<run-dir>/policy.onnx           # symbol-agnostic graph
+s3://moleapp-rl-data/momodkr/<run-dir>/policy.json           # manifest the Rust engine asserts at startup
+s3://moleapp-rl-data/momodkr/<run-dir>/policy.bundle.json    # per-symbol normalisation stats
 s3://moleapp-rl-data/momodkr/<run-dir>/best_checkpoint/best_checkpoint.zip   # for re-export / debugging
 ```
+
+The Rust feature_builder loads `policy.bundle.json` into a
+`HashMap<Symbol, NormStats>` once at startup and z-scores raw market
+features per-symbol before each ONNX call.
 
 ## 10. Tear down the pod
 
