@@ -89,11 +89,41 @@ tmux kill-session -t <name>          # stop the job
 tail -f /workspace/logs/<name>.log   # watch the log without attaching
 ```
 
+## Data window rationale (read this BEFORE running the ingest)
+
+Binance Vision **stopped archiving daily `bookTicker` (top-of-book)
+data around late March 2024.** Both daily and monthly archives 404 for
+any date after roughly 2024-03-31. `aggTrades`, `bookDepth`, and
+`klines` continue current.
+
+Since the env's `micro_price`, `log_spread_bps`, `top1_size_imbalance`,
+and OFI features depend on `bookTicker`, the ingest is anchored to a
+date that PRE-dates the cutoff. The default is `BINANCE_BOOKTICKER_CUTOFF
+= 2024-03-15` (known-good).
+
+| Mode | Window |
+|---|---|
+| `test` | (cutoff − 6 days) .. cutoff = **2024-03-09 .. 2024-03-15** |
+| `full` | (cutoff − 2 years) .. cutoff = **2022-03-15 .. 2024-03-15** |
+
+You can override the cutoff via env var:
+```bash
+BINANCE_BOOKTICKER_CUTOFF=2023-12-31 bash runpod/bg.sh ingest-full 'bash runpod/run_ingest.sh full'
+```
+
+The 2 years of "stale" data is intentional: training on it gets you a
+deployable v1 brain, and the Sim-to-Real gap against current
+Hyperliquid microstructure is closed empirically in Phase 9 via
+small-capital live calibration. If Phase 9 shows the gap is too wide,
+the upgrade path is Tardis.dev or CryptoLake (paid L2 archives) — but
+defer until you have real numbers.
+
 ## 3. Phase 1 — sanity ingest (~30-60 min, ~10 GB)
 
-This pulls the last 7 days of `bookTicker + aggTrades + bookDepth` for
-BTC/ETH/SOL, reconstructs 100ms snapshots, validates them against the
-1-hour kline cross-check (`max_mid_drift ≤ 1bp`), and uploads to R2.
+This pulls the 7 days ending `BINANCE_BOOKTICKER_CUTOFF` of
+`bookTicker + aggTrades + bookDepth` for BTC/ETH/SOL, reconstructs
+100ms snapshots, validates them against the 1-hour kline cross-check
+(`max_mid_drift ≤ 1bp`), and uploads to R2.
 
 ```bash
 bash runpod/bg.sh ingest-test 'bash runpod/run_ingest.sh test'
