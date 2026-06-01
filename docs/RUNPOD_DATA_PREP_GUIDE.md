@@ -91,28 +91,38 @@ tail -f /workspace/logs/<name>.log   # watch the log without attaching
 
 ## Data window rationale (read this BEFORE running the ingest)
 
-Binance Vision **stopped archiving daily `bookTicker` (top-of-book)
-data around late March 2024.** Both daily and monthly archives 404 for
-any date after roughly 2024-03-31. `aggTrades`, `bookDepth`, and
-`klines` continue current.
+Binance Vision's `bookTicker` (top-of-book) archive has BOTH a start
+and an end date — verified via direct HTTP probes:
 
-Since the env's `micro_price`, `log_spread_bps`, `top1_size_imbalance`,
-and OFI features depend on `bookTicker`, the ingest is anchored to a
-date that PRE-dates the cutoff. The default is `BINANCE_BOOKTICKER_CUTOFF
-= 2024-03-15` (known-good).
-
-| Mode | Window |
+| Stream | Window |
 |---|---|
-| `test` | (cutoff − 6 days) .. cutoff = **2024-03-09 .. 2024-03-15** |
-| `full` | (cutoff − 2 years) .. cutoff = **2022-03-15 .. 2024-03-15** |
+| `bookTicker` | **2023-05-22 .. 2024-03-15** (~10 months) |
+| `bookDepth` | starts ~2022-Q4, ends 2024-03 (limited by bookTicker for our pipeline) |
+| `aggTrades` | continuous, no cutoff |
+| `klines`, `fundingRate` | continuous, no cutoff |
 
-You can override the cutoff via env var:
+The env's `micro_price`, `log_spread_bps`, `top1_size_imbalance`, and
+OFI features depend on `bookTicker`, so the full pull is anchored to
+this ~10-month bookTicker window:
+
+| Mode | Window | Days |
+|---|---|---|
+| `test` | 2024-03-09 .. 2024-03-15 | 7 |
+| `full` | 2023-05-22 .. 2024-03-15 | 298 |
+
+After 80/20 chronological split that's ~238 days train + ~60 days
+eval — plenty for PPO. moleapp ran on 2 years but the eval split was
+~5 months; our ~2 months eval is still statistically meaningful.
+
+Override via env vars to use any sub-window:
 ```bash
-BINANCE_BOOKTICKER_CUTOFF=2023-12-31 bash runpod/bg.sh ingest-full 'bash runpod/run_ingest.sh full'
+BINANCE_BOOKTICKER_START=2023-08-01 \
+BINANCE_BOOKTICKER_CUTOFF=2024-02-29 \
+bash runpod/bg.sh ingest-full 'bash runpod/run_ingest.sh full'
 ```
 
-The 2 years of "stale" data is intentional: training on it gets you a
-deployable v1 brain, and the Sim-to-Real gap against current
+The "10 months ending March 2024" data is intentional: training on it
+gets you a deployable v1 brain, and the Sim-to-Real gap against current
 Hyperliquid microstructure is closed empirically in Phase 9 via
 small-capital live calibration. If Phase 9 shows the gap is too wide,
 the upgrade path is Tardis.dev or CryptoLake (paid L2 archives) — but

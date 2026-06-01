@@ -8,15 +8,19 @@
 # Both modes are idempotent: re-runs skip days already downloaded + uploaded.
 # The 'full' mode reuses the 'test' window's parquets (zero redundant work).
 #
-# IMPORTANT: Binance Vision stopped archiving bookTicker (top-of-book) data
-# around late March 2024. Since the env's micro_price / spread / OFI features
-# depend on bookTicker, we anchor the date window to BINANCE_BOOKTICKER_CUTOFF
-# (default 2024-03-15, the freshest known-good date). The "freshness gap" is
-# closed empirically in Phase 9 via small-capital live calibration against
-# Hyperliquid. See docs/RUNPOD_DATA_PREP_GUIDE.md "Data window rationale".
+# IMPORTANT: Binance Vision's bookTicker (top-of-book) archive has BOTH a
+# start AND an end date:
+#   - START: 2023-05-22 (earlier than this is 404 for bookTicker + bookDepth)
+#   - END:   2024-03-15 (later than this is 404; archive discontinued)
+# So the usable L2 window is ~10 months: 2023-05-22 .. 2024-03-15.
 #
-# Override the cutoff if Binance starts archiving bookTicker again, or to use
-# an older window: BINANCE_BOOKTICKER_CUTOFF=2023-12-31 bash runpod/run_ingest.sh full
+# The env's micro_price / spread / OFI features depend on bookTicker, so the
+# "full" pull is capped to this window rather than the naive cutoff-minus-2-years.
+# Phase 9 closes the Sim-to-Real gap empirically; if more data is needed,
+# upgrade to Tardis.dev. See docs/RUNPOD_DATA_PREP_GUIDE.md "Data window rationale".
+#
+# Override either bound to widen/narrow the window:
+#   BINANCE_BOOKTICKER_START=2023-08-01 BINANCE_BOOKTICKER_CUTOFF=2024-02-29 bash runpod/run_ingest.sh full
 
 set -euo pipefail
 
@@ -28,13 +32,15 @@ RAW_ROOT="${RAW_ROOT:-data/raw/binance_vision}"
 HTTP_WORKERS="${HTTP_WORKERS:-12}"
 RECON_WORKERS="${RECON_WORKERS:-4}"
 
-# Anchor: latest date for which we know bookTicker + aggTrades + bookDepth
-# are all available on Binance Vision. Override via env var.
+# Anchors: the window where bookTicker + aggTrades + bookDepth are ALL
+# available on Binance Vision. Override via env vars if you want a sub-range.
+BINANCE_BOOKTICKER_START="${BINANCE_BOOKTICKER_START:-2023-05-22}"
 BINANCE_BOOKTICKER_CUTOFF="${BINANCE_BOOKTICKER_CUTOFF:-2024-03-15}"
 
 END_TEST="${END_TEST:-$BINANCE_BOOKTICKER_CUTOFF}"
 START_TEST=$(date -u -d "${END_TEST} - 6 days" +%Y-%m-%d 2>/dev/null || date -u -j -v-6d -f "%Y-%m-%d" "${END_TEST}" +%Y-%m-%d)
-START_FULL=$(date -u -d "${END_TEST} - 2 years" +%Y-%m-%d 2>/dev/null || date -u -j -v-2y -f "%Y-%m-%d" "${END_TEST}" +%Y-%m-%d)
+START_FULL="${START_FULL:-$BINANCE_BOOKTICKER_START}"
+END_FULL="${END_FULL:-$BINANCE_BOOKTICKER_CUTOFF}"
 
 case "$MODE" in
     test)
@@ -44,8 +50,12 @@ case "$MODE" in
         ;;
     full)
         START="$START_FULL"
-        END="$END_TEST"
+        END="$END_FULL"
         echo "Mode=full  window=${START}..${END}  symbols=${SYMBOLS[*]}"
+        # Compute span in days for visibility
+        if days=$(python -c "from datetime import date; print((date.fromisoformat('${END}') - date.fromisoformat('${START}')).days)" 2>/dev/null); then
+            echo "  span: ${days} days  (~$((days * 3))  day-tasks at 3 streams/day across 3 symbols)"
+        fi
         ;;
     *)
         echo "Usage: $0 {test|full}"
