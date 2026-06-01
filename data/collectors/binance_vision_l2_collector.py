@@ -272,7 +272,7 @@ def parse_and_persist(
     dataset_root: Path,
     overwrite: bool = False,
     max_workers: int | None = None,
-    max_tasks_per_child: int = 25,
+    max_tasks_per_child: int | None = None,
     progress_every: int = 100,
 ) -> dict[FetchTask, Path]:
     """Parse each downloaded ZIP into a per-day Parquet under dataset_root, in parallel.
@@ -286,15 +286,13 @@ def parse_and_persist(
     and crash with BrokenProcessPool. Override via the PARSE_WORKERS env
     var if you know your memory headroom.
 
-    max_tasks_per_child=25 forces each worker to be recycled after 25
-    tasks. Python's allocator doesn't return memory to the OS even after
-    DataFrames are GC'd, so without recycling each worker's RSS grows
-    monotonically toward its largest-DataFrame high-water mark. Recycling
-    keeps the floor low without hurting throughput (process spawn is
-    fast vs the per-task work).
-
-    Emits a progress line every `progress_every` files so long parses
-    aren't silent.
+    max_tasks_per_child defaults to None (no recycling). Setting it
+    forces Python's ProcessPoolExecutor into 'spawn' context, which
+    re-imports pandas/boto3/numpy from scratch on every worker recycle
+    (10-30 sec/worker startup cost). With only 8 workers our memory
+    high-water mark is bounded at ~16 GB peak, well under typical pod
+    quotas, so recycling is more harm than help. Set it explicitly if
+    you have a tighter memory budget AND can tolerate the spawn cost.
     """
     import os
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -326,8 +324,8 @@ def parse_and_persist(
             logger.warning("ignoring non-integer PARSE_WORKERS=%r", env_workers)
     n_workers = max_workers or min(os.cpu_count() or 4, len(pending), 8)
     logger.info(
-        "parsing %d ZIPs with %d processes (max_tasks_per_child=%d)...",
-        len(pending), n_workers, max_tasks_per_child,
+        "parsing %d ZIPs with %d processes (max_tasks_per_child=%s)...",
+        len(pending), n_workers, "unlimited" if max_tasks_per_child is None else str(max_tasks_per_child),
     )
 
     # Build {(sym, stream, day_iso) -> FetchTask} so we can map results back.
@@ -344,7 +342,10 @@ def parse_and_persist(
 
     done = 0
     failed = 0
-    with ProcessPoolExecutor(max_workers=n_workers, max_tasks_per_child=max_tasks_per_child) as ex:
+    pool_kwargs: dict = {"max_workers": n_workers}
+    if max_tasks_per_child is not None:
+        pool_kwargs["max_tasks_per_child"] = max_tasks_per_child
+    with ProcessPoolExecutor(**pool_kwargs) as ex:
         futures = [ex.submit(_parse_one, *args) for args in args_list]
         for fut in as_completed(futures):
             try:
