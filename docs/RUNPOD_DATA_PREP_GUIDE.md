@@ -34,9 +34,24 @@ cd momodkr-ai-agent
 bash runpod/setup.sh
 ```
 
-`setup.sh` checks Python ≥ 3.11, runs `pip install -e .[dev]`, probes R2
-reachability via `head_bucket`, and runs `pytest -q`. Stop here if any of
-those fail — fix the env before downloading 600 GB you can't upload.
+`setup.sh` checks Python ≥ 3.11, **installs tmux** (used by every
+long-running step), runs `pip install -e .[dev]`, probes R2 reachability
+via `head_bucket`, and runs `pytest -q`. Stop here if any of those fail
+— fix the env before downloading 600 GB you can't upload.
+
+### About `runpod/bg.sh` — the SSH-drop-proof launcher
+
+Every multi-hour step below is launched via `bash runpod/bg.sh <name>
+'<command>'`, which spawns a detached tmux session. If your SSH
+disconnects, the job keeps running. Lifecycle:
+
+```bash
+tmux ls                              # list active sessions
+tmux attach -t <name>                # reattach + see live output
+                                      #   (Ctrl-b then d to detach again, leaves it running)
+tmux kill-session -t <name>          # stop the job
+tail -f /workspace/logs/<name>.log   # watch the log without attaching
+```
 
 ## 3. Phase 1 — sanity ingest (~30-60 min, ~10 GB)
 
@@ -45,7 +60,8 @@ BTC/ETH/SOL, reconstructs 100ms snapshots, validates them against the
 1-hour kline cross-check (`max_mid_drift ≤ 1bp`), and uploads to R2.
 
 ```bash
-bash runpod/run_ingest.sh test
+bash runpod/bg.sh ingest-test 'bash runpod/run_ingest.sh test'
+tmux attach -t ingest-test          # watch live; Ctrl-b d to detach
 ```
 
 **Verification checkpoints:**
@@ -59,17 +75,20 @@ glitch will hit 100+ days in the full pull.
 
 ## 4. Phase 1 — full 2-year pull (4-8 hours, ~600 GB)
 
-Detached so a dropped SSH doesn't kill it:
+Launch detached so a dropped SSH doesn't kill it. The tmux session
+keeps the process alive AND lets you reattach later to see live output:
 
 ```bash
-nohup bash runpod/run_ingest.sh full > /workspace/momodkr-ingest.log 2>&1 &
-disown
+bash runpod/bg.sh ingest-full 'bash runpod/run_ingest.sh full'
 ```
 
-Monitor with:
+Output of `bg.sh` will print the reattach + tail commands. Disconnect
+freely; reattach from any new SSH:
 
 ```bash
-tail -f /workspace/momodkr-ingest.log
+tmux ls
+tmux attach -t ingest-full           # Ctrl-b d to detach without killing
+tail -f /workspace/logs/ingest-full.log
 du -sh data/datasets data/raw/binance_vision
 ```
 
@@ -95,12 +114,13 @@ encodings) then concatenates them into chronological `train.parquet` +
 `eval.parquet` with a train-only `norm_stats.json`.
 
 ```bash
-python -m scripts.build_features \
+bash runpod/bg.sh features "python -m scripts.build_features \
     --symbols BTCUSDT ETHUSDT SOLUSDT \
     --dataset-root data/datasets \
     --episodes-root data/episodes \
     --split-ratio 0.8 \
-    --workers 8
+    --workers 8"
+tmux attach -t features    # reattach to watch progress
 ```
 
 **What gets written:**
@@ -184,3 +204,6 @@ You're now ready for the [Training guide](RUNPOD_TRAINING_GUIDE.md).
 | `validate_l2_data` fails `mid_vs_kline_drift` | Reconstruction lost too much liquidity on a thin-book day | Confirm `bookDepth` parquet for that day exists; if not, day was unarchived — log and skip |
 | `build_features` fails `feature_version mismatch` | A per-day parquet was produced by an older code | Delete `data/datasets/<SYM>/features/` and re-run; `_concat_features` rejects mixed versions by design |
 | Disk fills during `full` pull | Estimated 700 GB; volume may be too small | Mount a 1.5 TB volume or split into two pods by symbol |
+| `bg.sh` says "session already exists" | Old job still running (or zombie pane after exit) | `tmux attach -t <name>` to check; `tmux kill-session -t <name>` if dead |
+| `tmux: command not found` | setup.sh didn't run or wasn't a Debian/Ubuntu image | `apt-get update && apt-get install -y tmux` (or yum) — then re-run setup |
+| Reattach shows just `=== job exited, press any key ===` | Job finished while you were disconnected | The log under `/workspace/logs/<name>.log` has the full history; press a key to close the pane |

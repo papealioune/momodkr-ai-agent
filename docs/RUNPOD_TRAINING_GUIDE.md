@@ -34,6 +34,17 @@ bash runpod/setup.sh
 nvidia-smi    # confirm the GPU is visible
 ```
 
+`setup.sh` installs tmux automatically — every long-running step below
+goes through `runpod/bg.sh <session_name> <command>`, which spawns a
+detached tmux session so an SSH drop never kills the job. Lifecycle:
+
+```bash
+tmux ls                              # list active sessions
+tmux attach -t <name>                # reattach (Ctrl-b d detaches, leaves running)
+tmux kill-session -t <name>          # stop the job
+tail -f /workspace/logs/<name>.log   # watch the log without attaching
+```
+
 ## 3. Pull episodes from R2 (~5 min, ~10 GB)
 
 Only the episode bundles need to land locally — raw L2 stays on R2.
@@ -59,14 +70,15 @@ weights can't survive a holdout month, no amount of additional steps
 will save them — and the full 20M run is ~20× more expensive.
 
 ```bash
-python -m scripts.walk_forward \
+bash runpod/bg.sh walkforward "python -m scripts.walk_forward \
     --symbol BTCUSDT \
     --train-start 2024-01-01 --train-end 2024-06-30 \
     --eval-start  2024-07-01 --eval-end  2024-07-31 \
     --train-config configs/training/v1_walkforward.yaml \
     --env-config   configs/env/momodkr_v1.yaml \
-    --run-dir runs/walkforward-btc-2024H1 \
-    2>&1 | tee runs/walkforward-btc-2024H1.log
+    --run-dir runs/walkforward-btc-2024H1"
+
+tmux attach -t walkforward    # watch live; Ctrl-b d to detach
 ```
 
 **Decision gate after walk-forward:**
@@ -101,28 +113,34 @@ to fail later.
 ## 5. Full 20M-step training (~12-24 hours)
 
 Once walk-forward is green, launch the cold-start on the full 2-year
-train split. Detached so SSH drops don't kill it:
+train split inside its own tmux session — SSH drops, network blips, or
+even closing your laptop won't kill it:
 
 ```bash
 mkdir -p runs/v1-engine-cold-btc
-nohup python -m training.train_ppo \
+
+bash runpod/bg.sh train-btc "python -m training.train_ppo \
     --train-config configs/training/v1_engine_cold.yaml \
     --env-config   configs/env/momodkr_v1.yaml \
     --train-parquet data/episodes/BTCUSDT/0.1.0/train.parquet \
     --eval-parquet  data/episodes/BTCUSDT/0.1.0/eval.parquet \
-    --run-dir runs/v1-engine-cold-btc \
-    > runs/v1-engine-cold-btc/train.log 2>&1 &
-disown
+    --run-dir runs/v1-engine-cold-btc"
 ```
 
-**Watch:**
+**Watch (any time, any new SSH session):**
 
 ```bash
-# tail the headline metrics
-tail -f runs/v1-engine-cold-btc/train.log | grep -E 'eval/mean_reward|killswitch/entropy_pct|New best'
+# A) reattach the tmux pane and see live SB3 output
+tmux attach -t train-btc        # Ctrl-b d to detach, training keeps running
 
-# disk usage
+# B) or filter the log without attaching
+tail -f /workspace/logs/train-btc.log | grep -E 'eval/mean_reward|killswitch/entropy_pct|New best'
+
+# C) disk usage
 du -sh runs/v1-engine-cold-btc
+
+# D) GPU utilisation
+nvidia-smi
 ```
 
 The three callbacks fire automatically:
@@ -138,15 +156,15 @@ The three callbacks fire automatically:
 
 **Optional — staged curriculum.** Use this AFTER you have a working
 single-symbol run to fan out to BTC+ETH then BTC+ETH+SOL with
-warm-starts:
+warm-starts. Curriculums run for 24-48 hours, so background it too:
 
 ```bash
-python -m training.curriculum \
+bash runpod/bg.sh curriculum "python -m training.curriculum \
     --curriculum-config configs/training/curriculum_v1.yaml \
     --base-train-config configs/training/v1_engine_cold.yaml \
     --env-config        configs/env/momodkr_v1.yaml \
     --episodes-root data/episodes \
-    --run-dir runs/curriculum-v1
+    --run-dir runs/curriculum-v1"
 ```
 
 ## 6. Backup best_checkpoint BEFORE doing anything else
@@ -249,3 +267,6 @@ ONNX, ingests Hyperliquid l2Book WebSocket, and signs EIP-712.
 | Parity fails: `action_match: false` but logits close | Ties in argmax due to symmetric logits early in training | Train more steps; this resolves itself once the policy specialises |
 | GPU at 5% utilisation | env.step is the bottleneck (expected for MLP PPO) | Raise `vec_env.n_envs` from 12 → 16; use more vCPUs |
 | Disk fills with eval JSONs + tb logs | Long training run + record_obs=true | Disable record_obs after walk-forward confirms parity; the production run only needs it on the last eval pass |
+| `bg.sh` says "session already exists" | Old training session still running (or zombie pane) | `tmux attach -t train-btc` to inspect; `tmux kill-session -t train-btc` if dead |
+| `tmux attach` shows `=== job exited, press any key ===` | Training finished (or aborted) while disconnected | Full output is in `/workspace/logs/<session>.log`; press a key to close the pane |
+| SSH dropped mid-training | Expected; tmux protects you | Reconnect → `tmux attach -t train-btc` → all good, no work lost |
