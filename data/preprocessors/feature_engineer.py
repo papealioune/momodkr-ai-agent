@@ -72,9 +72,19 @@ def build_market_features(snapshots: pd.DataFrame) -> pd.DataFrame:
     for k, v in _cyclical_time_features(df["ts_ms"]).items():
         df[k] = v
 
+    # Days where Binance Vision didn't archive bookDepth (a small minority) end up
+    # with no depth columns in the snapshot. Treat that as "no depth visible" (0.0)
+    # rather than failing the whole day -- 0 is a valid "thin book" signal the
+    # policy can learn from, and tolerating it loses < 0.2% of the dataset to
+    # known archive gaps instead of dropping every day with any missing column.
+    # Non-depth missing columns still hard-fail (they'd be a real bug).
+    depth_prefixes = ("bid_depth_pct_", "ask_depth_pct_")
     missing = [c for c in MARKET_FEATURE_NAMES if c not in df.columns]
-    if missing:
-        raise KeyError(f"feature engineer did not produce: {missing}")
+    non_depth_missing = [c for c in missing if not c.startswith(depth_prefixes)]
+    if non_depth_missing:
+        raise KeyError(f"feature engineer did not produce: {non_depth_missing}")
+    for c in missing:
+        df[c] = 0.0
 
     sim_cols_present = [c for c in SIM_STATE_COLS if c in df.columns]
     out = df[["ts_ms", *MARKET_FEATURE_NAMES, *sim_cols_present]].copy()
