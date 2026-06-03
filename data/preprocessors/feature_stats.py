@@ -33,6 +33,7 @@ build to keep the policy net's input bounded.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -117,6 +118,21 @@ def load_norm_stats(path: Path) -> NormStats:
         raise ValueError(
             f"norm_stats mean length {len(raw.get('mean', []))} != expected {len(MARKET_FEATURE_NAMES)}"
         )
+    # Streaming Welford in episode_builder propagates NaN forever once it
+    # ingests a NaN batch -- the funding columns have leading-NaN rows at
+    # each per-day boundary, so the persisted mean/std for those columns
+    # land as NaN. Sanitize on load: NaN mean -> 0.0, NaN/zero std -> 1.0.
+    # This pairs with the env's nan_to_num on the raw features (the env
+    # zero-fills the funding columns, so passing through with mean=0/std=1
+    # leaves them at 0.0 = neutral "no funding pressure" -- which is what
+    # the reward function already assumes).
+    mean = [0.0 if (m is None or (isinstance(m, float) and not math.isfinite(m))) else float(m) for m in raw["mean"]]
+    std = [
+        1.0 if (s is None or (isinstance(s, float) and not math.isfinite(s)) or float(s) < EPS) else float(s)
+        for s in raw["std"]
+    ]
+    raw["mean"] = mean
+    raw["std"] = std
     return NormStats(**raw)
 
 
