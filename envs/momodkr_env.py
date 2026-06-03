@@ -21,6 +21,7 @@ Episode termination:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from data.preprocessors.feature_stats import (
     NormStats,
@@ -189,7 +192,41 @@ class MomoDkrEnv(gym.Env):
             if missing_sim:
                 raise KeyError(f"episode parquet missing simulator state columns ({path}): {missing_sim}")
             features = df[list(MARKET_FEATURE_NAMES)].to_numpy(dtype=np.float32)
+            # feature_engineer only dropna's rolling cols, so funding_8h_rate /
+            # funding_cumulative carry leading NaN at each day boundary (each
+            # day starts before the first 8h funding publish). When the env
+            # concatenates ~58d of training data, ~33% of rows have NaN
+            # funding. Treat NaN/Inf as the neutral "no funding pressure"
+            # value (0.0) so the policy never sees NaN obs. Logs counts per
+            # column so we notice if a *non-funding* col develops a leak.
+            invalid_mask = ~np.isfinite(features)
+            if invalid_mask.any():
+                col_counts = invalid_mask.sum(axis=0)
+                affected = [
+                    (MARKET_FEATURE_NAMES[i], int(col_counts[i]))
+                    for i in range(len(MARKET_FEATURE_NAMES))
+                    if col_counts[i] > 0
+                ]
+                logger.warning(
+                    "loaded %s: %d NaN/Inf cells in features -> zero-fill; per-col: %s",
+                    path.name, int(invalid_mask.sum()), affected,
+                )
+                features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
             sim_state = {c: df[c].to_numpy(dtype=np.float64) for c in SIM_STATE_COLS}
+            # funding_rate carries leading NaN at day boundaries (same root
+            # cause as features above). NaN here flows into per-tick funding
+            # accrual and corrupts NAV. mid/bid_px/ask_px should never be NaN
+            # so we assert hard on those -- a NaN there is a real data bug.
+            for col in ("mid", "bid_px", "ask_px"):
+                if not np.isfinite(sim_state[col]).all():
+                    bad = int((~np.isfinite(sim_state[col])).sum())
+                    raise ValueError(
+                        f"{path.name}: {bad} NaN/Inf in {col!r} -- price feed corrupted, refusing to train"
+                    )
+            for col in ("funding_rate", "abs_volume_100ms"):
+                arr = sim_state[col]
+                if not np.isfinite(arr).all():
+                    sim_state[col] = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
             ts_ms = df["ts_ms"].to_numpy(dtype=np.int64)
             if len(df) <= self.config.episode_length_ticks + 1:
                 raise ValueError(
