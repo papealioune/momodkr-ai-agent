@@ -45,7 +45,8 @@ eval:
 
 callbacks:
   sigma_divergence_killswitch:
-    threshold_action_entropy_pct: 0.85
+    high_threshold: 0.85   # normalised entropy > 0.85 = near-uniform random
+    low_threshold: 0.05    # < 0.05 = policy collapse onto one action
     consecutive_evals: 2
   trade_log:
     record_obs: true

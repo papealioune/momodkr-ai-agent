@@ -142,10 +142,14 @@ def train(
     train_parquet: Path | list[Path],
     eval_parquet: Path | list[Path] | None,
     run_dir: Path,
+    seed_override: int | None = None,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     train_cfg = load_yaml(train_config_path)
     env_cfg = env_cfg_from_yaml(env_config_path)
+
+    if seed_override is not None:
+        train_cfg["seed"] = int(seed_override)
 
     n_envs = int(train_cfg.get("vec_env", {}).get("n_envs", 1))
     kind = train_cfg.get("vec_env", {}).get("type", "dummy")
@@ -215,6 +219,7 @@ def main() -> None:
     p.add_argument("--train-parquet", required=True, nargs="+", help="one or more episode parquets (multi-symbol pool)")
     p.add_argument("--eval-parquet", default=None, nargs="+")
     p.add_argument("--run-dir", required=True)
+    p.add_argument("--seed", type=int, default=None, help="override seed in train config (lets one YAML drive multi-seed runs)")
     args = p.parse_args()
     train_paths = [Path(x) for x in args.train_parquet]
     eval_paths = [Path(x) for x in args.eval_parquet] if args.eval_parquet else None
@@ -224,6 +229,7 @@ def main() -> None:
         train_paths if len(train_paths) > 1 else train_paths[0],
         eval_paths if eval_paths is not None and len(eval_paths) > 1 else (eval_paths[0] if eval_paths else None),
         Path(args.run_dir),
+        seed_override=args.seed,
     )
 
 
