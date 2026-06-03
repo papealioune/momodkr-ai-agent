@@ -39,6 +39,7 @@ dependencies = [
 
     # Observability
     "wandb>=0.17.0",
+    "tensorboard>=2.16.0",  # required by wandb sync_tensorboard=True so SB3 logger metrics reach W&B
     "matplotlib>=3.9.0",
     "rich>=13.7.0",
 ]
