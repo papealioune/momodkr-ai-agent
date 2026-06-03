@@ -109,7 +109,7 @@ def build_ppo(model_kwargs: dict, env: VecEnv) -> PPO:
     return PPO(env=env, **model_kwargs)
 
 
-def model_kwargs_from_config(train_cfg: dict, log_dir: Path) -> dict:
+def model_kwargs_from_config(train_cfg: dict, log_dir: Path, force_tensorboard: bool = False) -> dict:
     kwargs: dict = {
         "policy": train_cfg.get("policy", "MlpPolicy"),
         "n_steps": int(train_cfg.get("n_steps", 2048)),
@@ -126,13 +126,13 @@ def model_kwargs_from_config(train_cfg: dict, log_dir: Path) -> dict:
         "verbose": 1,
         "seed": int(train_cfg.get("seed", [42])[0]) if isinstance(train_cfg.get("seed"), list) else int(train_cfg.get("seed", 42)),
     }
-    if train_cfg.get("tensorboard_log", False):
+    if train_cfg.get("tensorboard_log", False) or force_tensorboard:
         try:
             import tensorboard  # noqa: F401
 
             kwargs["tensorboard_log"] = str(log_dir / "tb")
         except ImportError:
-            logger.warning("tensorboard_log=True in config but tensorboard not installed; skipping")
+            logger.warning("tensorboard_log=True (or W&B sync) requested but tensorboard not installed; skipping")
     return kwargs
 
 
@@ -143,6 +143,7 @@ def train(
     eval_parquet: Path | list[Path] | None,
     run_dir: Path,
     seed_override: int | None = None,
+    no_wandb: bool = False,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     train_cfg = load_yaml(train_config_path)
@@ -151,9 +152,39 @@ def train(
     if seed_override is not None:
         train_cfg["seed"] = int(seed_override)
 
+    base_seed = int(train_cfg.get("seed", [42])[0]) if isinstance(train_cfg.get("seed"), list) else int(train_cfg.get("seed", 42))
+    run_name = str(train_cfg.get("run_name", run_dir.name))
+
+    wandb_project = train_cfg.get("wandb_project") if not no_wandb else None
+    wandb_run = None
+    wandb_cb = None
+    if wandb_project:
+        try:
+            import wandb
+            from wandb.integration.sb3 import WandbCallback
+
+            wandb_run = wandb.init(
+                project=str(wandb_project),
+                name=f"{run_name}-s{base_seed}",
+                group=run_name,
+                config={"train": train_cfg, "env_config_path": str(env_config_path)},
+                dir=str(run_dir),
+                sync_tensorboard=True,
+                save_code=False,
+            )
+            wandb_cb = WandbCallback(
+                model_save_path=str(run_dir / "wandb_artifacts"),
+                model_save_freq=int(train_cfg.get("checkpoint_freq", 250_000)),
+                verbose=2,
+            )
+            logger.info("W&B run live: project=%s name=%s-s%d url=%s", wandb_project, run_name, base_seed, wandb_run.url)
+        except ImportError:
+            logger.warning("wandb_project=%s set but wandb not installed; continuing without W&B", wandb_project)
+        except Exception as e:
+            logger.warning("wandb.init failed (%s); continuing without W&B", e)
+
     n_envs = int(train_cfg.get("vec_env", {}).get("n_envs", 1))
     kind = train_cfg.get("vec_env", {}).get("type", "dummy")
-    base_seed = int(train_cfg.get("seed", [42])[0]) if isinstance(train_cfg.get("seed"), list) else int(train_cfg.get("seed", 42))
 
     train_env = build_vec_env(train_parquet, env_cfg, n_envs, kind, base_seed)
     eval_env = build_vec_env(eval_parquet or train_parquet, env_cfg, n_envs=1, kind="dummy", base_seed=base_seed + 9999)
@@ -169,8 +200,10 @@ def train(
             "ent_coef": resolve_schedule_or_float(train_cfg.get("ent_coef", 0.005)),
         }
         model = PPO.load(warm_path, env=train_env, custom_objects=custom_objects)
+        if wandb_run is not None:
+            model.tensorboard_log = str(run_dir / "tb")
     else:
-        model = build_ppo(model_kwargs_from_config(train_cfg, run_dir), train_env)
+        model = build_ppo(model_kwargs_from_config(train_cfg, run_dir, force_tensorboard=wandb_run is not None), train_env)
 
     eval_cfg = train_cfg.get("eval", {})
     best_dir = run_dir / "best_checkpoint"
@@ -199,11 +232,17 @@ def train(
     )
 
     total_timesteps = int(train_cfg.get("total_timesteps", 20_000_000))
+    callback_list = CallbackList([eval_cb, wandb_cb]) if wandb_cb is not None else eval_cb
     try:
-        model.learn(total_timesteps=total_timesteps, callback=eval_cb, log_interval=10)
+        model.learn(total_timesteps=total_timesteps, callback=callback_list, log_interval=10)
     finally:
         train_env.close()
         eval_env.close()
+        if wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception:
+                pass
 
     final_path = run_dir / "final_checkpoint.zip"
     model.save(final_path)
@@ -220,6 +259,7 @@ def main() -> None:
     p.add_argument("--eval-parquet", default=None, nargs="+")
     p.add_argument("--run-dir", required=True)
     p.add_argument("--seed", type=int, default=None, help="override seed in train config (lets one YAML drive multi-seed runs)")
+    p.add_argument("--no-wandb", action="store_true", help="disable W&B even if wandb_project is set in the config (smoke tests, offline dev)")
     args = p.parse_args()
     train_paths = [Path(x) for x in args.train_parquet]
     eval_paths = [Path(x) for x in args.eval_parquet] if args.eval_parquet else None
@@ -230,6 +270,7 @@ def main() -> None:
         eval_paths if eval_paths is not None and len(eval_paths) > 1 else (eval_paths[0] if eval_paths else None),
         Path(args.run_dir),
         seed_override=args.seed,
+        no_wandb=args.no_wandb,
     )
 
 
