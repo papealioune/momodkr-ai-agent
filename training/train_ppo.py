@@ -34,7 +34,7 @@ from envs.reward.wrappers import apply_full_reward_shaping
 from training.callbacks.best_checkpoint_tracker import BestCheckpointTracker
 from training.callbacks.sigma_divergence_killswitch import SigmaDivergenceKillswitch
 from training.callbacks.trade_log_callback import TradeLogCallback
-from training.utils import load_yaml, resolve_schedule_or_float
+from training.utils import load_yaml, resolve_policy_kwargs, resolve_schedule_or_float
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ def model_kwargs_from_config(train_cfg: dict, log_dir: Path, force_tensorboard: 
         "max_grad_norm": float(train_cfg.get("max_grad_norm", 0.5)),
         "learning_rate": resolve_schedule_or_float(train_cfg.get("learning_rate", 3e-4)),
         "ent_coef": resolve_schedule_or_float(train_cfg.get("ent_coef", 0.005)),
-        "policy_kwargs": train_cfg.get("policy_kwargs"),
+        "policy_kwargs": resolve_policy_kwargs(train_cfg.get("policy_kwargs")),
         "verbose": 1,
         "seed": int(train_cfg.get("seed", [42])[0]) if isinstance(train_cfg.get("seed"), list) else int(train_cfg.get("seed", 42)),
     }

@@ -44,6 +44,40 @@ def resolve_schedule_or_float(spec: dict[str, Any] | float) -> float | Callable[
     return float(spec)
 
 
+_ACTIVATION_MAP: dict[str, str] = {
+    "tanh": "Tanh",
+    "relu": "ReLU",
+    "elu": "ELU",
+    "leaky_relu": "LeakyReLU",
+    "gelu": "GELU",
+    "silu": "SiLU",
+}
+
+
+def resolve_policy_kwargs(spec: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate YAML-friendly policy_kwargs into SB3-callable form.
+
+    SB3 expects `activation_fn` as a torch.nn class, not a string. YAML can
+    only express strings, so we map "tanh" -> torch.nn.Tanh here. Returns a
+    fresh dict so the original config remains YAML-safe (re-loadable).
+    """
+    if not spec:
+        return spec
+    import torch.nn as nn
+
+    out = dict(spec)
+    act = out.get("activation_fn")
+    if isinstance(act, str):
+        key = act.lower()
+        cls_name = _ACTIVATION_MAP.get(key)
+        if cls_name is None:
+            raise ValueError(
+                f"unknown activation_fn {act!r}; supported: {sorted(_ACTIVATION_MAP)}"
+            )
+        out["activation_fn"] = getattr(nn, cls_name)
+    return out
+
+
 def categorical_entropy_normalised(probs) -> float:
     """Shannon entropy of a categorical distribution, divided by ln(n_actions).
 
