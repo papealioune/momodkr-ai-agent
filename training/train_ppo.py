@@ -32,6 +32,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 from envs.momodkr_env import EnvConfig, MomoDkrEnv
 from envs.reward.wrappers import apply_full_reward_shaping
 from training.callbacks.best_checkpoint_tracker import BestCheckpointTracker
+from training.callbacks.entropy_schedule import EntropyScheduleCallback
 from training.callbacks.sigma_divergence_killswitch import SigmaDivergenceKillswitch
 from training.callbacks.trade_log_callback import TradeLogCallback
 from training.utils import load_yaml, resolve_policy_kwargs, resolve_schedule_or_float
@@ -110,6 +111,23 @@ def build_ppo(model_kwargs: dict, env: VecEnv) -> PPO:
     return PPO(env=env, **model_kwargs)
 
 
+def _ent_coef_start(spec) -> float:
+    """If `spec` is a {schedule, start, end} dict, return start as float.
+    Otherwise return float(spec). SB3 ent_coef doesn't accept callables."""
+    if isinstance(spec, dict):
+        return float(spec["start"])
+    return float(spec)
+
+
+def _ent_coef_schedule_callback(spec) -> EntropyScheduleCallback | None:
+    """Construct the linear-decay callback only when YAML expressed a schedule."""
+    if not isinstance(spec, dict):
+        return None
+    if spec.get("schedule", "linear") != "linear":
+        raise ValueError(f"unsupported ent_coef schedule {spec.get('schedule')!r}; only 'linear' supported")
+    return EntropyScheduleCallback(start=float(spec["start"]), end=float(spec["end"]))
+
+
 def model_kwargs_from_config(train_cfg: dict, log_dir: Path, force_tensorboard: bool = False) -> dict:
     kwargs: dict = {
         "policy": train_cfg.get("policy", "MlpPolicy"),
@@ -122,7 +140,11 @@ def model_kwargs_from_config(train_cfg: dict, log_dir: Path, force_tensorboard: 
         "vf_coef": float(train_cfg.get("vf_coef", 0.5)),
         "max_grad_norm": float(train_cfg.get("max_grad_norm", 0.5)),
         "learning_rate": resolve_schedule_or_float(train_cfg.get("learning_rate", 3e-4)),
-        "ent_coef": resolve_schedule_or_float(train_cfg.get("ent_coef", 0.005)),
+        # SB3 reads ent_coef as a raw float every train step (no callable
+        # support, unlike learning_rate). If the YAML expresses a schedule,
+        # we pass the start value here and attach EntropyScheduleCallback
+        # in train() to walk it down per rollout.
+        "ent_coef": _ent_coef_start(train_cfg.get("ent_coef", 0.005)),
         "policy_kwargs": resolve_policy_kwargs(train_cfg.get("policy_kwargs")),
         "verbose": 1,
         "seed": int(train_cfg.get("seed", [42])[0]) if isinstance(train_cfg.get("seed"), list) else int(train_cfg.get("seed", 42)),
@@ -233,7 +255,13 @@ def train(
     )
 
     total_timesteps = int(train_cfg.get("total_timesteps", 20_000_000))
-    callback_list = CallbackList([eval_cb, wandb_cb]) if wandb_cb is not None else eval_cb
+    extra_callbacks: list = []
+    ent_sched_cb = _ent_coef_schedule_callback(train_cfg.get("ent_coef"))
+    if ent_sched_cb is not None:
+        extra_callbacks.append(ent_sched_cb)
+    if wandb_cb is not None:
+        extra_callbacks.append(wandb_cb)
+    callback_list = CallbackList([eval_cb, *extra_callbacks]) if extra_callbacks else eval_cb
     try:
         model.learn(total_timesteps=total_timesteps, callback=callback_list, log_interval=10)
     finally:
