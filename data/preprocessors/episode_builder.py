@@ -23,10 +23,13 @@ import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from data.preprocessors.feature_stats import (
     DEFAULT_CLIP,
+    NormStats,
     compute_norm_stats,
     norm_stats_path_for_episodes,
     save_norm_stats,
@@ -37,6 +40,36 @@ from serving.feature_version import (
     MARKET_FEATURE_NAMES,
     SIM_STATE_COLS,
 )
+
+
+class _WelfordStats:
+    """Online (single-pass) per-column mean + std using Welford's algorithm.
+
+    Memory: O(n_features) regardless of input dataset size. Lets us
+    stream the 30 GB+ per-symbol concat without materialising it.
+    """
+
+    def __init__(self, n_features: int) -> None:
+        self.n = 0
+        self.mean = np.zeros(n_features, dtype=np.float64)
+        self.m2 = np.zeros(n_features, dtype=np.float64)
+
+    def update_batch(self, x: np.ndarray) -> None:
+        """x: (batch_n, n_features) float64."""
+        batch_n = x.shape[0]
+        if batch_n == 0:
+            return
+        batch_mean = x.mean(axis=0)
+        batch_m2 = ((x - batch_mean) ** 2).sum(axis=0)
+        delta = batch_mean - self.mean
+        total_n = self.n + batch_n
+        self.mean += delta * batch_n / total_n
+        self.m2 += batch_m2 + delta**2 * self.n * batch_n / total_n
+        self.n = total_n
+
+    def finalise(self) -> tuple[np.ndarray, np.ndarray]:
+        std = np.sqrt(self.m2 / self.n) if self.n > 0 else np.ones_like(self.mean)
+        return self.mean.astype(np.float32), std.astype(np.float32)
 
 logger = logging.getLogger(__name__)
 
@@ -110,14 +143,18 @@ def build_episodes(
     train_start: str | None = None,
     train_end: str | None = None,
     label: str | None = None,
+    batch_rows: int = 200_000,
 ) -> EpisodeManifest:
-    """Build chronological train/eval episodes for one symbol.
+    """Build chronological train/eval episodes for one symbol -- streaming.
+
+    Memory: O(batch_rows * n_cols) ≈ 50-100 MB regardless of dataset size.
+    The previous implementation pd.concat'd ~30 GB of per-day features into
+    one DataFrame, hitting OOM on memory-capped containers; this version
+    streams via pyarrow record batches and computes z-score stats via
+    Welford's online algorithm.
 
     train_start / train_end (inclusive, YYYY-MM-DD) restrict the source
-    days that feed into the concat. The 80/20 split still applies AFTER
-    filtering, so the split is on the filtered window. For pure
-    walk-forward (fixed train window then fixed eval window) call
-    build_walk_forward_split() instead.
+    days. The 80/20 split applies AFTER filtering.
     """
     if not 0.5 <= split_ratio < 1.0:
         raise ValueError(f"split_ratio must be in [0.5, 1.0), got {split_ratio}")
@@ -129,52 +166,134 @@ def build_episodes(
             f"[{train_start}..{train_end}]"
         )
 
-    full = _concat_features(paths)
-    if full.empty:
+    # Validate feature_version on the first file (cheap -- reads 1 row).
+    first_meta = pq.read_table(paths[0], columns=["feature_version"]).to_pandas()
+    if not first_meta.empty and first_meta["feature_version"].iloc[0] != FEATURE_VERSION:
+        raise ValueError(
+            f"feature_version mismatch in {paths[0]}: got "
+            f"{first_meta['feature_version'].iloc[0]!r} expected {FEATURE_VERSION!r}"
+        )
+
+    # Determine output columns (drop feature_version; keep ts_ms + market + sim).
+    schema_names = {f.name for f in pq.read_schema(paths[0])}
+    if "ts_ms" not in schema_names:
+        raise KeyError(f"missing ts_ms in {paths[0]}")
+    sim_cols_present = [c for c in SIM_STATE_COLS if c in schema_names]
+    output_cols = ["ts_ms", *MARKET_FEATURE_NAMES, *sim_cols_present]
+
+    # First pass: count rows per file from parquet metadata (does not read data).
+    row_counts = [pq.read_metadata(p).num_rows for p in paths]
+    total_rows = sum(row_counts)
+    if total_rows == 0:
         raise ValueError("no rows after concat")
-
-    sim_cols_present = [c for c in SIM_STATE_COLS if c in full.columns]
-    keep_cols = ["ts_ms", *MARKET_FEATURE_NAMES, *sim_cols_present]
-    full = full[keep_cols]
-
-    n = len(full)
-    split_idx = int(n * split_ratio)
-    train = full.iloc[:split_idx].reset_index(drop=True)
-    eval_df = full.iloc[split_idx:].reset_index(drop=True)
-    if eval_df["ts_ms"].iloc[0] <= train["ts_ms"].iloc[-1]:
-        raise ValueError("chronological split violated: eval starts at or before train end")
+    split_rows = int(total_rows * split_ratio)
 
     suffix = f"_{label}" if label else ""
     out_dir = episodes_root / symbol / f"{FEATURE_VERSION}{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
     train_path = out_dir / "train.parquet"
     eval_path = out_dir / "eval.parquet"
-    train.to_parquet(train_path, index=False, compression="zstd")
-    eval_df.to_parquet(eval_path, index=False, compression="zstd")
 
+    welford = _WelfordStats(len(MARKET_FEATURE_NAMES))
     sha = hashlib.sha256()
-    for col in MARKET_FEATURE_NAMES:
-        sha.update(full[col].to_numpy().tobytes())
-    data_hex = sha.hexdigest()[:16]
 
-    # Compute z-score stats on TRAIN ONLY (chronologically first 80%).
-    # These get baked into the env at training time and into the ONNX
-    # graph at export time so train and live inference normalise identically.
-    stats = compute_norm_stats(train, clip=norm_clip)
+    train_writer: pq.ParquetWriter | None = None
+    eval_writer: pq.ParquetWriter | None = None
+    rows_emitted = 0
+    train_first_ts: int | None = None
+    train_last_ts: int | None = None
+    eval_first_ts: int | None = None
+    eval_last_ts: int | None = None
+    prev_ts: int | None = None  # for monotonicity check across batches
+
+    # Second pass: stream batches and write incrementally.
+    for p in paths:
+        pf = pq.ParquetFile(p)
+        for batch in pf.iter_batches(batch_size=batch_rows, columns=output_cols):
+            n_in_batch = batch.num_rows
+            if n_in_batch == 0:
+                continue
+
+            batch_end_pos = rows_emitted + n_in_batch
+            if batch_end_pos <= split_rows:
+                train_part, eval_part = batch, None
+            elif rows_emitted >= split_rows:
+                train_part, eval_part = None, batch
+            else:
+                cut = split_rows - rows_emitted
+                train_part = batch.slice(0, cut)
+                eval_part = batch.slice(cut)
+
+            if train_part is not None and train_part.num_rows > 0:
+                if train_writer is None:
+                    train_writer = pq.ParquetWriter(train_path, train_part.schema, compression="zstd")
+                train_writer.write_batch(train_part)
+                # Welford update on the 26 market features
+                market_np = np.stack(
+                    [train_part.column(c).to_numpy(zero_copy_only=False) for c in MARKET_FEATURE_NAMES],
+                    axis=1,
+                ).astype(np.float64)
+                welford.update_batch(market_np)
+                # SHA-256 streaming over market columns
+                for c in MARKET_FEATURE_NAMES:
+                    sha.update(train_part.column(c).to_numpy(zero_copy_only=False).tobytes())
+                # Track ts bounds
+                ts_arr = train_part.column("ts_ms")
+                if train_first_ts is None:
+                    train_first_ts = int(ts_arr[0].as_py())
+                train_last_ts = int(ts_arr[-1].as_py())
+
+            if eval_part is not None and eval_part.num_rows > 0:
+                if eval_writer is None:
+                    eval_writer = pq.ParquetWriter(eval_path, eval_part.schema, compression="zstd")
+                eval_writer.write_batch(eval_part)
+                ts_arr = eval_part.column("ts_ms")
+                if eval_first_ts is None:
+                    eval_first_ts = int(ts_arr[0].as_py())
+                eval_last_ts = int(ts_arr[-1].as_py())
+
+            # Monotonic ts_ms check (cheap: just first vs prev_last)
+            first_ts = int(batch.column("ts_ms")[0].as_py())
+            if prev_ts is not None and first_ts <= prev_ts:
+                raise ValueError(
+                    f"feature concatenation produced non-monotonic ts_ms at {p}: "
+                    f"prev={prev_ts} cur_first={first_ts}"
+                )
+            prev_ts = int(batch.column("ts_ms")[-1].as_py())
+
+            rows_emitted += n_in_batch
+
+    if train_writer is not None:
+        train_writer.close()
+    if eval_writer is not None:
+        eval_writer.close()
+
+    if eval_first_ts is not None and train_last_ts is not None and eval_first_ts <= train_last_ts:
+        raise ValueError("chronological split violated: eval starts at or before train end")
+
+    mean, std = welford.finalise()
+    stats = NormStats(
+        feature_version=FEATURE_VERSION,
+        feature_spec_checksum=FEATURE_SPEC_CHECKSUM,
+        n_train_rows=int(welford.n),
+        clip=float(norm_clip),
+        mean=mean.tolist(),
+        std=std.tolist(),
+    )
     stats_path = save_norm_stats(stats, norm_stats_path_for_episodes(out_dir))
 
     manifest = EpisodeManifest(
         symbol=symbol,
         feature_version=FEATURE_VERSION,
         feature_spec_checksum=FEATURE_SPEC_CHECKSUM,
-        train_rows=len(train),
-        eval_rows=len(eval_df),
-        train_start_ms=int(train["ts_ms"].iloc[0]),
-        train_end_ms=int(train["ts_ms"].iloc[-1]),
-        eval_start_ms=int(eval_df["ts_ms"].iloc[0]),
-        eval_end_ms=int(eval_df["ts_ms"].iloc[-1]),
+        train_rows=int(welford.n),
+        eval_rows=total_rows - int(welford.n),
+        train_start_ms=int(train_first_ts) if train_first_ts is not None else 0,
+        train_end_ms=int(train_last_ts) if train_last_ts is not None else 0,
+        eval_start_ms=int(eval_first_ts) if eval_first_ts is not None else 0,
+        eval_end_ms=int(eval_last_ts) if eval_last_ts is not None else 0,
         split_ratio=split_ratio,
-        data_sha256_prefix=data_hex,
+        data_sha256_prefix=sha.hexdigest()[:16],
         norm_stats_path=str(stats_path),
         norm_clip=float(stats.clip),
     )
