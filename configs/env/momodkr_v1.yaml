@@ -1,5 +1,12 @@
 apply_obs_normalisation: true   # z-score market features using train-only norm_stats.json baked alongside each episode
 position_feature_clip: 3.0       # hard clip on the 4 position features so leveraged unrealized swings don't blow up the MLP input
+# RAM-bound knob: only the last N rows of each episode parquet are loaded
+# (pyarrow row-group tail filter). Full BTC train.parquet = ~200M rows =
+# ~25-30GB peak in pandas per env -- impossible on 58GB pods at n_envs > 1.
+# 5M rows ~= 58d of 100ms data is plenty of episodes for the Phase-4
+# Mann-Whitney U baseline gate; raise (or set null) on >=128GB boxes.
+# Applies to BOTH train and eval parquets (same EnvConfig drives both).
+max_rows_tail: 5_000_000
 
 env:
   symbols: [BTCUSDT, ETHUSDT, SOLUSDT]

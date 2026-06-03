@@ -76,6 +76,7 @@ def env_cfg_from_yaml(env_yaml_path: Path) -> EnvConfig:
         initial_nav_usd=float(raw.get("initial_nav_usd", 10_000.0)),
         apply_obs_normalisation=bool(raw.get("apply_obs_normalisation", True)),
         position_feature_clip=float(raw.get("position_feature_clip", 3.0)),
+        max_rows_tail=raw.get("max_rows_tail"),
     )
     cfg.sim.fee_taker_bps = float(sim.get("fee_taker_bps", cfg.sim.fee_taker_bps))
     cfg.sim.fee_maker_bps = float(sim.get("fee_maker_bps", cfg.sim.fee_maker_bps))

@@ -90,6 +90,12 @@ class EnvConfig:
     # Hard clip on the 4 position features so policy inputs stay bounded
     # even under leverage-amplified extreme PnL excursions.
     position_feature_clip: float = 3.0
+    # If set, only the LAST N rows of each episode parquet are loaded via
+    # pyarrow row-group filtering. Lets us run multi-env SubprocVec on
+    # smaller pods without OOM (the full BTC train parquet is ~200M rows
+    # = ~25-30GB peak in pandas; 5M rows ~= 60d of 100ms data is plenty
+    # for the Phase-4 single-asset baseline gate). None = load everything.
+    max_rows_tail: int | None = None
 
 
 class MomoDkrEnv(gym.Env):
@@ -131,16 +137,51 @@ class MomoDkrEnv(gym.Env):
 
     # ------------------------------------------------------------------ data
 
+    @staticmethod
+    def _read_parquet_tail(path: Path, needed_cols: list[str], max_rows: int | None) -> pd.DataFrame:
+        """Load up to the last `max_rows` rows from a parquet, reading only
+        the row groups that actually cover them. Lets a 200M-row file load
+        into <1GB of pandas memory when max_rows=5M.
+
+        max_rows=None preserves the old eager read_parquet() path for
+        backward compatibility with tests + small synthetic data.
+        """
+        if max_rows is None or max_rows <= 0:
+            return pd.read_parquet(path)
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(str(path))
+        total_rows = pf.metadata.num_rows
+        schema_cols = {f.name for f in pf.schema_arrow}
+        read_cols = [c for c in needed_cols if c in schema_cols]
+        if total_rows <= max_rows:
+            return pf.read(columns=read_cols).to_pandas()
+        # Walk row groups from the tail until we've covered max_rows.
+        selected: list[int] = []
+        accum = 0
+        for rg_idx in reversed(range(pf.metadata.num_row_groups)):
+            selected.append(rg_idx)
+            accum += pf.metadata.row_group(rg_idx).num_rows
+            if accum >= max_rows:
+                break
+        selected.reverse()
+        table = pf.read_row_groups(selected, columns=read_cols)
+        if accum > max_rows:
+            # Trim the leading excess so we return exactly max_rows.
+            table = table.slice(accum - max_rows)
+        return table.to_pandas()
+
     def _load_all_episodes(self) -> None:
         self._features_pool: list[np.ndarray] = []
         self._sim_state_pool: list[dict[str, np.ndarray]] = []
         self._ts_ms_pool: list[np.ndarray] = []
         self._n_rows_pool: list[int] = []
         self._norm_stats_pool: list[NormStats | None] = []
+        needed_cols = ["ts_ms", *MARKET_FEATURE_NAMES, *SIM_STATE_COLS]
         for path in self.parquet_paths:
             if not path.exists():
                 raise FileNotFoundError(f"episode parquet not found: {path}")
-            df = pd.read_parquet(path)
+            df = self._read_parquet_tail(path, needed_cols, self.config.max_rows_tail)
             missing_feats = [c for c in MARKET_FEATURE_NAMES if c not in df.columns]
             if missing_feats:
                 raise KeyError(f"episode parquet missing market features ({path}): {missing_feats}")
