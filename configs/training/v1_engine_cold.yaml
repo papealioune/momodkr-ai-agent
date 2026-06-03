@@ -35,7 +35,11 @@ data_config: configs/data/binance_vision_v1.yaml
 
 vec_env:
   type: subproc
-  n_envs: 12
+  # n_envs sizing is RAM-bound: each MomoDkrEnv pd.read_parquet's the full
+  # ~8GB BTC train.parquet (~13GB in-memory). At 12 envs on a 58GB pod we
+  # OOM at load. 3 envs ≈ 39GB resident, leaves ~19GB headroom on a 4090
+  # pod. Bump to 8-12 only on A100/H100 boxes with >=128GB system RAM.
+  n_envs: 3
 
 eval:
   n_eval_episodes: 8
