@@ -3,7 +3,12 @@ seed: [42, 43, 44]
 
 algo: ppo
 policy: MlpPolicy
-total_timesteps: 20_000_000
+# Seed-42 baseline peaked at +2.72 around 4M steps and degraded into
+# negative territory by 17M (the moleapp §5 late-stage divergence
+# pattern). 6M gives ~50% headroom past the typical peak; best_checkpoint
+# captures the deployment artifact, the rest is just wasted compute.
+# Bump back to 20M only for a long-tail decay study on a passing config.
+total_timesteps: 6_000_000
 n_steps: 2048
 batch_size: 512
 n_epochs: 4
@@ -35,11 +40,12 @@ data_config: configs/data/binance_vision_v1.yaml
 
 vec_env:
   type: subproc
-  # n_envs sizing -- safe on 58GB pods when env_yaml.max_rows_tail caps the
-  # per-env parquet load to ~5M rows (~2GB peak per env). 8 envs = ~16GB
-  # peak load + ~2GB eval + ~5GB main = ~23GB. Bump to 12-16 on >=128GB
-  # boxes with max_rows_tail=null (full episode parquet).
-  n_envs: 8
+  # n_envs sizing -- with env_yaml.max_rows_tail=5M the per-env steady
+  # state is ~2GB. 16 envs = ~32GB train + ~2GB eval + ~5GB main = ~39GB
+  # on a 58GB pod (19GB headroom). Combined with CUDA_VISIBLE_DEVICES=""
+  # this maximises EPYC core utilisation on the 4090 box where the GPU
+  # transfer cost dominates compute for our MLP policy anyway.
+  n_envs: 16
 
 eval:
   n_eval_episodes: 8
