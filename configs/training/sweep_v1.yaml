@@ -16,6 +16,8 @@
 # Phase 4 gate clears if you want a longer-tail decay study.
 
 program: training/train_ppo.py
+project: momodkr        # MUST match train_ppo.py's wandb.init(project=...)
+entity: dapps4africa    # so the sweep controller + the runs live in the same place
 method: bayes
 metric:
   name: eval/mean_reward
@@ -33,7 +35,10 @@ command:
   - --train-parquet
   - data/episodes/BTCUSDT/0.1.0/train.parquet
   - --eval-parquet
-  - data/episodes/BTCUSDT/0.1.0/eval.parquet
+  # eval_selection.parquet = first 58.55d of eval. Holdout (last 1d) is
+  # reserved for the final ranker on the sweep winners, so the sweep
+  # cannot overfit to the holdout distribution by construction.
+  - data/episodes/BTCUSDT/0.1.0/eval_selection.parquet
   - --run-dir
   - runs/sweep-v1
 
