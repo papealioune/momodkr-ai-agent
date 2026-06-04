@@ -35,7 +35,7 @@ from training.callbacks.best_checkpoint_tracker import BestCheckpointTracker
 from training.callbacks.entropy_schedule import EntropyScheduleCallback
 from training.callbacks.sigma_divergence_killswitch import SigmaDivergenceKillswitch
 from training.callbacks.trade_log_callback import TradeLogCallback
-from training.utils import load_yaml, resolve_policy_kwargs, resolve_schedule_or_float
+from training.utils import apply_dotted_override, load_yaml, resolve_policy_kwargs, resolve_schedule_or_float
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,36 @@ def train(
                 sync_tensorboard=True,
                 save_code=False,
             )
+            # Apply any W&B sweep parameters as overrides to train_cfg.
+            # In sweep mode, wandb.config is pre-populated by the agent with
+            # the hyperparams sampled by the sweep controller; our own
+            # config={"train": train_cfg, ...} call merges into the same
+            # dict, so sweep params land as top-level keys distinct from
+            # the snapshot ones we just supplied. Apply via dotted keys so
+            # the sweep YAML can target nested YAML hyperparams like
+            # "ent_coef.start" or "vec_env.n_envs".
+            snapshot_keys = {"train", "env_config_path"}
+            sweep_overrides = {
+                k: v for k, v in dict(wandb_run.config).items() if k not in snapshot_keys
+            }
+            if sweep_overrides:
+                for key, value in sweep_overrides.items():
+                    apply_dotted_override(train_cfg, key, value)
+                logger.info(
+                    "applied %d W&B sweep override(s): %s",
+                    len(sweep_overrides), sweep_overrides,
+                )
+                # Re-derive base_seed in case the sweep is rolling the seed too.
+                base_seed_cfg = train_cfg.get("seed", base_seed)
+                if isinstance(base_seed_cfg, list):
+                    base_seed = int(base_seed_cfg[0])
+                else:
+                    base_seed = int(base_seed_cfg)
+            # In sweep mode, redirect run_dir to a per-run subdir so each
+            # sweep iteration writes its own best_checkpoint / eval_logs.
+            if wandb_run.sweep_id is not None:
+                run_dir = run_dir / wandb_run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
             wandb_cb = WandbCallback(
                 model_save_path=str(run_dir / "wandb_artifacts"),
                 model_save_freq=int(train_cfg.get("checkpoint_freq", 250_000)),

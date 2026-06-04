@@ -78,6 +78,22 @@ def resolve_policy_kwargs(spec: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+def apply_dotted_override(cfg: dict[str, Any], key: str, value: Any) -> None:
+    """Set cfg[a][b][c] for key="a.b.c". Creates intermediate dicts as needed.
+
+    Lets W&B sweep parameters target nested YAML keys (e.g. "ent_coef.start"
+    or "vec_env.n_envs") without forcing every sweepable hyperparam to be
+    flat at the top level of the training YAML.
+    """
+    parts = key.split(".")
+    cur = cfg
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur[p], dict):
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
+
+
 def categorical_entropy_normalised(probs) -> float:
     """Shannon entropy of a categorical distribution, divided by ln(n_actions).
 

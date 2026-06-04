@@ -1,0 +1,76 @@
+# W&B sweep config for Phase-4 hyperparameter exploration.
+#
+# Create the sweep:
+#   wandb sweep configs/training/sweep_v1.yaml
+# Launch agents (one per pod, runs sequentially):
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# Each agent invocation runs `python -m training.train_ppo` with the
+# fixed `command` args below, and W&B drops the sampled hyperparameters
+# into wandb.config. train_ppo.py reads wandb.config after wandb.init()
+# and applies them as dotted-key overrides on top of the train YAML.
+#
+# Search budget guidance: total_timesteps is shortened to 6M because the
+# Seed-42 baseline peaked at ~4M before late-stage divergence; sweeping
+# at full 20M just burns compute past the peak. Bump back to 20M after
+# Phase 4 gate clears if you want a longer-tail decay study.
+
+program: training/train_ppo.py
+method: bayes
+metric:
+  name: eval/mean_reward
+  goal: maximize
+
+command:
+  - ${env}
+  - python
+  - -m
+  - training.train_ppo
+  - --train-config
+  - configs/training/v1_engine_cold.yaml
+  - --env-config
+  - configs/env/momodkr_v1.yaml
+  - --train-parquet
+  - data/episodes/BTCUSDT/0.1.0/train.parquet
+  - --eval-parquet
+  - data/episodes/BTCUSDT/0.1.0/eval.parquet
+  - --run-dir
+  - runs/sweep-v1
+
+parameters:
+  # Cap each sweep run at 6M steps; the v1_engine_cold YAML default of
+  # 20M is past the typical peak and just wastes compute during search.
+  total_timesteps:
+    value: 6000000
+
+  # Core PPO hyperparams -- moleapp-tuned defaults bracketed within a
+  # sweep range tight enough that Bayes converges in 20-40 runs.
+  learning_rate:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.0005
+
+  ent_coef.start:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.02
+
+  ent_coef.end:
+    values: [0.0001, 0.0005, 0.001]
+
+  gamma:
+    values: [0.99, 0.995, 0.999]
+
+  clip_range:
+    values: [0.1, 0.2, 0.3]
+
+  n_steps:
+    values: [1024, 2048, 4096]
+
+  batch_size:
+    values: [256, 512, 1024]
+
+  # Seed varies across runs so the sweep doesn't optimize to one
+  # particular initial network state.
+  seed:
+    values: [42, 43, 44, 100, 101]
